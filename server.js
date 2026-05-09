@@ -48,6 +48,49 @@ const context   = new ContextManager();
 const gdocs     = new GoogleDocsManager(io);
 const autoWriter = new AutoWriter(io, claude, gemini, context, gdocs, SessionManager);
 
+// ── BookBible 항상 유효하게 유지 ─────────────────────
+function getBookBible() {
+  if (!state.bookBible) {
+    state.bookBible = {
+      title: state.bookTitle || '도서',
+      characters: [], themes: [], keywords: [],
+      prohibitedWords: [], writingStyle: '',
+    };
+  }
+  // 제목이 없거나 기본값이면 항상 최신 bookTitle 사용
+  if (!state.bookBible.title || state.bookBible.title === '도서') {
+    state.bookBible.title = state.bookTitle || '도서';
+  }
+  return state.bookBible;
+}
+
+// ── Google Docs 자동 보장 (없으면 자동 생성) ──────────
+async function ensureGdocs() {
+  if (gdocs.isReady()) return true;
+  const title = state.bookTitle || '도서집필도우미_자동저장';
+  io.emit('gdocs:status', { message: 'Google Docs 자동 생성 중...' });
+  const r = await gdocs.createOrReuseDoc(title);
+  if (r.success) {
+    state.masterDocId = r.docId;
+    SessionManager.save();
+    io.emit('gdocs:ready', { docId: r.docId, url: gdocs.getDocUrl(), reused: false });
+  }
+  return r.success;
+}
+
+// ── 챕터 저장 공통 함수 ──────────────────────────────
+async function saveChapterAuto(ch, content) {
+  if (!ch || !content || content.length < 50) return;
+  const ok = await ensureGdocs();
+  if (ok) {
+    await gdocs.saveChapter(ch, content);
+  } else {
+    io.emit('gdocs:error', { message: 'Google Docs 저장 실패 — 로컬에만 저장됨' });
+  }
+  SessionManager.saveChapterContent(ch.id, content);
+  SessionManager.save();
+}
+
 // Genspark → Google Docs 자동 저장 콜백
 genspark.onComplete = async (content) => {
   if (!content || content.length < 100) return;
@@ -55,9 +98,7 @@ genspark.onComplete = async (content) => {
   if (ch) {
     ch.content = content; ch.writtenChars = content.length; ch.status = 'done';
     state.totalWritten = state.chapters.reduce((s,c) => s + (c.writtenChars||0), 0);
-    if (gdocs.isReady()) await gdocs.saveChapter(ch, content);
-    SessionManager.saveChapterContent(ch.id, content);
-    SessionManager.save();
+    await saveChapterAuto(ch, content);
     io.emit('chapter:done', { id: ch.id, title: ch.title, chars: content.length, totalWritten: state.totalWritten });
   }
 };
@@ -120,7 +161,7 @@ app.post('/api/genspark/send', async (req, res) => {
   if (!genspark.connected) return res.json({ success: false, message: 'Genspark 미연결' });
 
   const contextBlock = context.buildContextBlock(ch.id);
-  const prompt = PromptBuilder.build(ch, state.bookBible, contextBlock, ch.id);
+  const prompt = PromptBuilder.build(ch, getBookBible(), contextBlock, ch.id);
 
   ch.status = 'writing';
   io.emit('chapter:writing', { id: ch.id, title: ch.title });
@@ -143,6 +184,150 @@ app.post('/api/genspark/send', async (req, res) => {
 app.post('/api/genspark/clear', async (req, res) => {
   await genspark.clearForNewSession();
   res.json({ success: true });
+});
+
+// Genspark로 목차 생성
+app.post('/api/genspark/generate-toc', async (req, res) => {
+  const { text, bookTitle, totalTarget } = req.body;
+  if (!genspark.connected) return res.json({ success: false, message: 'Genspark 미연결' });
+  if (!text) return res.json({ success: false, message: '텍스트 필요' });
+
+  const target = parseInt(totalTarget) || 4000000;
+  const title  = bookTitle || state.bookTitle || '도서';
+  if (title && title !== '도서') state.bookTitle = title;
+
+  const prompt = `아래 기획서를 분석해서 도서 『${title}』의 목차를 JSON 배열로 만들어주세요.
+
+기획서:
+${text.substring(0, 30000)}
+
+규칙:
+1. type은 반드시: 프롤로그, 르포, 에세이, 대화, 에필로그 중 하나
+2. partNum: 프롤로그=0, PART1=1, PART2=2, PART3=3, PART4=4, 에필로그=5
+3. 총 targetChars 합계 = ${target.toLocaleString()}자에 근접
+4. title 값에 큰따옴표(") 사용 금지
+5. 반드시 JSON 배열만 출력. 설명 문장 없이.
+
+출력 형식:
+[{"id":1,"num":1,"type":"프롤로그","title":"제목","partNum":0,"targetChars":20000},{"id":2,"num":2,"type":"르포","title":"제목","partNum":1,"targetChars":50000}]`;
+
+  io.emit('status:change', { status: 'analyzing', message: 'Genspark(Claude Opus 4.6)로 목차 생성 중...' });
+  const result = await genspark.generate(prompt, 300000);
+
+  if (!result.success) {
+    io.emit('status:change', { status: 'idle', message: '목차 생성 실패' });
+    return res.json(result);
+  }
+
+  // JSON 파싱
+  try {
+    const cleaned = result.text.replace(/```[a-z]*\s*/gi, '').replace(/```/g, '');
+    const start   = cleaned.indexOf('[');
+    const end     = cleaned.lastIndexOf(']');
+    if (start === -1 || end <= start) throw new Error('JSON 배열 없음');
+    const raw = JSON.parse(cleaned.slice(start, end + 1));
+    const chapters = raw.map((ch, i) => ({
+      id: ch.id||i+1, num: ch.num||i+1, type: ch.type||'르포',
+      title: ch.title||`챕터 ${i+1}`, partNum: ch.partNum??1,
+      targetChars: ch.targetChars||Math.floor(target/raw.length),
+      status:'pending', writtenChars:0, content:'', chapterSummary:'',
+    }));
+    state.chapters  = chapters;
+    state.bookBible = { title: state.bookTitle, characters:[], themes:[], keywords:[], prohibitedWords:[], writingStyle:'' };
+    context.initFromBible(state.bookBible);
+    state.status = 'ready';
+    SessionManager.save();
+    io.emit('outline:generated', { chapters, bookTitle: state.bookTitle });
+    io.emit('status:change', { status: 'ready', message: `Genspark 목차 ${chapters.length}개 생성 완료` });
+    res.json({ success: true, chapters });
+  } catch (err) {
+    io.emit('status:change', { status: 'idle', message: '목차 파싱 실패' });
+    // 파싱 실패 시 raw 텍스트라도 반환
+    res.json({ success: false, message: err.message, rawText: result.text.substring(0, 500) });
+  }
+});
+
+// Genspark로 스토리텔링 생성
+app.post('/api/genspark/generate-story', async (req, res) => {
+  if (!genspark.connected) return res.json({ success: false, message: 'Genspark 미연결' });
+  if (!state.chapters.length) return res.json({ success: false, message: '목차가 없습니다' });
+
+  const title = state.bookTitle || '도서';
+  const tocText = state.chapters.map(ch =>
+    `CH.${ch.num} [${ch.type}] ${ch.title} (목표 ${(ch.targetChars/1000).toFixed(0)}k자)`
+  ).join('\n');
+
+  const prompt = `도서 『${title}』의 전체 목차를 보고 각 챕터의 스토리 흐름을 작성해주세요.
+
+목차:
+${tocText}
+
+각 챕터마다 다음 형식으로 작성:
+**CH.번호 — 챕터제목**
+이 챕터에서 다룰 핵심 스토리, 등장인물의 상황, 독자에게 전달할 메시지를 2~3문장으로.
+
+전체 챕터를 PART 순서대로 빠짐없이 작성하세요.`;
+
+  io.emit('status:change', { status: 'analyzing', message: 'Genspark로 스토리텔링 생성 중...' });
+  const result = await genspark.generate(prompt, 300000);
+  io.emit('status:change', { status: 'ready', message: '스토리텔링 생성 완료' });
+
+  if (result.success) {
+    // 챕터별 요약 파싱해서 저장
+    const lines = result.text.split('\n');
+    let currentChNum = null;
+    let summaryLines = [];
+    const summaries = {};
+
+    for (const line of lines) {
+      const match = line.match(/\*\*CH\.(\d+)|CH\.(\d+)\s*—/);
+      if (match) {
+        if (currentChNum && summaryLines.length) {
+          summaries[parseInt(currentChNum)] = summaryLines.join(' ').trim();
+        }
+        currentChNum = match[1] || match[2];
+        summaryLines = [];
+      } else if (currentChNum && line.trim()) {
+        summaryLines.push(line.trim());
+      }
+    }
+    if (currentChNum && summaryLines.length) {
+      summaries[parseInt(currentChNum)] = summaryLines.join(' ').trim();
+    }
+
+    // 챕터에 summary 반영
+    state.chapters.forEach(ch => {
+      if (summaries[ch.num]) ch.summary = summaries[ch.num].substring(0, 200);
+    });
+    SessionManager.save();
+    io.emit('story:generated', { storyText: result.text, chapters: state.chapters });
+  }
+  res.json(result);
+});
+
+// Genspark로 기획서 분석/보강
+app.post('/api/genspark/analyze-plan', async (req, res) => {
+  if (!genspark.connected) return res.json({ success: false, message: 'Genspark 미연결' });
+  const { text } = req.body;
+  if (!text) return res.json({ success: false, message: '기획서 텍스트 필요' });
+
+  const prompt = `아래 도서 기획서를 분석하고 핵심 내용을 구조화해서 정리해주세요.
+
+기획서 원문:
+${text.substring(0, 20000)}
+
+다음 항목을 명확하게 정리해주세요:
+1. 도서 제목 및 부제
+2. 핵심 주제와 메시지
+3. 주요 등장인물 (이름, 나이, 직업, 역할)
+4. 각 PART별 핵심 내용
+5. 독자 대상
+6. 예상 분량 및 구성`;
+
+  io.emit('status:change', { status: 'analyzing', message: 'Genspark로 기획서 분석 중...' });
+  const result = await genspark.generate(prompt, 180000);
+  io.emit('status:change', { status: 'ready', message: '기획서 분석 완료' });
+  res.json(result);
 });
 
 app.post('/api/genspark/diagnose', async (req, res) => {
@@ -184,25 +369,74 @@ app.post('/api/genspark/manual-save', async (req, res) => {
 // API — 기획서 분석 & 목차 생성
 // ══════════════════════════════════════════════════════
 
-// ── 목차 생성 공통 함수 (Gemini 실패 시 Claude 자동 대체) ──
+// ── 목차 생성 공통 함수 (우선순위: Genspark → Gemini → Claude) ──
 async function generateOutlineAuto(planningText, totalTarget) {
   const target = parseInt(totalTarget) || 4000000;
 
-  // Gemini 우선 시도
+  // 1순위: Genspark (연결돼 있으면 항상 Genspark 사용)
+  if (genspark.connected) {
+    io.emit('status:change', { status: 'analyzing', message: '🤖 Genspark(Claude Opus 4.6)로 목차 생성 중...' });
+    const prompt = buildTocPrompt(planningText, state.bookTitle || '도서', target);
+    const gsResult = await genspark.generate(prompt, 300000);
+    if (gsResult.success) {
+      return parseTocFromText(gsResult.text, target);
+    }
+    io.emit('status:change', { status: 'analyzing', message: 'Genspark 응답 파싱 실패 → Gemini로 전환...' });
+  }
+
+  // 2순위: Gemini
   if (gemini.isReady()) {
     io.emit('status:change', { status: 'analyzing', message: 'Gemini로 목차 생성 중...' });
     const r = await gemini.generateOutline(planningText, target);
     if (r.success) return r;
-    io.emit('status:change', { status: 'analyzing', message: `Gemini 실패 → Claude로 전환 중...` });
+    io.emit('status:change', { status: 'analyzing', message: 'Gemini 실패 → Claude로 전환 중...' });
   }
 
-  // Claude fallback
+  // 3순위: Claude
   if (claude.isReady()) {
     io.emit('status:change', { status: 'analyzing', message: 'Claude로 목차 생성 중...' });
     return await claude.generateOutline(planningText, target);
   }
 
-  return { success: false, message: 'Gemini와 Claude 모두 연결되지 않았습니다. API 키를 설정하세요.' };
+  return { success: false, message: 'AI가 연결되지 않았습니다. Genspark 또는 API 키를 연결하세요.' };
+}
+
+// 목차 생성 프롬프트 빌더
+function buildTocPrompt(text, title, target) {
+  return `아래 기획서를 분석해서 도서 『${title}』의 목차를 JSON 배열로 만들어주세요.
+
+기획서:
+${text.substring(0, 30000)}
+
+규칙:
+1. type은 반드시: 프롤로그, 르포, 에세이, 대화, 에필로그 중 하나
+2. partNum: 프롤로그=0, PART1=1, PART2=2, PART3=3, PART4=4, 에필로그=5
+3. 총 targetChars 합계 = ${target.toLocaleString()}자에 근접
+4. title 값에 큰따옴표 사용 금지
+5. 반드시 JSON 배열만 출력. 설명 문장 없이.
+
+출력 형식:
+[{"id":1,"num":1,"type":"프롤로그","title":"제목","partNum":0,"targetChars":20000},{"id":2,"num":2,"type":"르포","title":"제목","partNum":1,"targetChars":50000}]`;
+}
+
+// 텍스트에서 목차 JSON 파싱
+function parseTocFromText(text, totalTarget) {
+  try {
+    const cleaned = text.replace(/```[a-z]*\s*/gi, '').replace(/```/g, '');
+    const start = cleaned.indexOf('[');
+    const end   = cleaned.lastIndexOf(']');
+    if (start === -1 || end <= start) throw new Error('JSON 배열 없음');
+    const raw = JSON.parse(cleaned.slice(start, end + 1));
+    const chapters = raw.map((ch, i) => ({
+      id: ch.id||i+1, num: ch.num||i+1, type: ch.type||'르포',
+      title: ch.title||`챕터 ${i+1}`, partNum: ch.partNum??1,
+      targetChars: ch.targetChars||Math.floor(totalTarget/raw.length),
+      status:'pending', writtenChars:0, content:'', chapterSummary:'',
+    }));
+    return { success: true, chapters };
+  } catch (err) {
+    return { success: false, message: `파싱 실패: ${err.message}` };
+  }
 }
 
 // Google Docs URL에서 기획서 읽기 → AI 분석
@@ -223,6 +457,9 @@ app.post('/api/outline/from-url', async (req, res) => {
     state.chapters  = result.chapters;
     state.bookTitle = readResult.title || state.bookTitle;
     state.status    = 'ready';
+    // bookBible 초기화 (제목 포함)
+    state.bookBible = { title: state.bookTitle, characters: [], themes: [], keywords: [], prohibitedWords: [], writingStyle: '' };
+    context.initFromBible(state.bookBible);
     SessionManager.save();
     io.emit('outline:generated', { chapters: result.chapters, bookTitle: state.bookTitle });
     io.emit('status:change', { status: 'ready', message: `목차 ${result.chapters.length}개 생성 완료` });
@@ -243,6 +480,9 @@ app.post('/api/outline/from-text', async (req, res) => {
   if (result.success) {
     state.chapters = result.chapters;
     state.status   = 'ready';
+    // bookBible 초기화
+    state.bookBible = { title: state.bookTitle, characters: [], themes: [], keywords: [], prohibitedWords: [], writingStyle: '' };
+    context.initFromBible(state.bookBible);
     SessionManager.save();
     io.emit('outline:generated', { chapters: result.chapters, bookTitle: state.bookTitle });
     io.emit('status:change', { status: 'ready', message: `목차 ${result.chapters.length}개 생성 완료` });
@@ -258,7 +498,17 @@ app.post('/api/outline/from-text', async (req, res) => {
 
 app.post('/api/upload', upload.single('file'), async (req, res) => {
   if (!req.file) return res.json({ success: false, message: '파일 없음' });
-  const result = await FileParser.parse(req.file.path, req.file.originalname);
+
+  // 파일명 인코딩 수정 (mojibake 방지)
+  let originalname = req.file.originalname;
+  try {
+    // Latin-1로 잘못 읽힌 UTF-8 바이트를 복구
+    const buf = Buffer.from(originalname, 'latin1');
+    if (buf.toString('utf8') !== originalname) originalname = buf.toString('utf8');
+  } catch (_) {}
+
+  const result = await FileParser.parse(req.file.path, originalname);
+  result.filename = originalname;
   try { fs.unlinkSync(req.file.path); } catch (_) {}
   res.json(result);
 });
@@ -270,17 +520,39 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
 app.post('/api/gemini/refine-toc', async (req, res) => {
   const { message, totalTarget } = req.body;
   if (!message) return res.json({ success: false, message: '메시지 필요' });
+  const target = parseInt(totalTarget) || 4000000;
+
   let result;
-  if (gemini.isReady()) {
-    result = await gemini.refineTOC(message, state.chapters, parseInt(totalTarget) || 4000000);
-    if (!result.success && claude.isReady()) {
-      result = await claude.refineTOC(message, state.chapters, parseInt(totalTarget) || 4000000);
+
+  // Genspark 우선
+  if (genspark.connected) {
+    const tocSummary = state.chapters.map((ch,i) => `${i+1}. [P${ch.partNum}/${ch.type}] ${ch.title} (${(ch.targetChars/1000).toFixed(0)}k자)`).join('\n');
+    const prompt = `현재 도서 목차를 아래 요청에 따라 수정해주세요.
+
+현재 목차:
+${tocSummary}
+
+수정 요청: ${message}
+
+수정된 전체 목차를 JSON 배열로만 출력하세요. 설명 없이.
+[{"id":1,"num":1,"type":"프롤로그","title":"제목","partNum":0,"targetChars":20000},...]`;
+
+    const gsResult = await genspark.generate(prompt, 180000);
+    if (gsResult.success) {
+      result = parseTocFromText(gsResult.text, target);
+      if (result.success) result.response = gsResult.text;
+      else result = { success: true, response: gsResult.text, updatedChapters: null };
     }
-  } else if (claude.isReady()) {
-    result = await claude.refineTOC(message, state.chapters, parseInt(totalTarget) || 4000000);
-  } else {
-    return res.json({ success: false, message: 'AI가 연결되지 않음' });
   }
+
+  // fallback
+  if (!result?.success) {
+    if (gemini.isReady()) result = await gemini.refineTOC(message, state.chapters, target);
+    if (!result?.success && claude.isReady()) result = await claude.refineTOC(message, state.chapters, target);
+  }
+
+  if (!result) return res.json({ success: false, message: 'AI가 연결되지 않음 — Genspark를 연결하세요' });
+
   if (result.success && result.updatedChapters) {
     state.chapters = result.updatedChapters;
     io.emit('outline:updated', { chapters: result.updatedChapters });
@@ -293,15 +565,21 @@ app.post('/api/gemini/chat', async (req, res) => {
   const { message } = req.body;
   if (!message) return res.json({ success: false, message: '메시지 필요' });
   const ctx = { bookTitle: state.bookTitle, chaptersCount: state.chapters.length, writtenChars: state.totalWritten };
-  let result;
-  if (gemini.isReady()) {
-    result = await gemini.chat(message, ctx);
-    if (!result.success && claude.isReady()) result = await claude.chat(message, ctx);
-  } else if (claude.isReady()) {
-    result = await claude.chat(message, ctx);
-  } else {
-    return res.json({ success: false, message: 'Gemini 또는 Claude API 키를 먼저 설정하세요' });
+
+  // Genspark 우선
+  if (genspark.connected) {
+    const prompt = `당신은 도서 집필 전문 AI 비서입니다. [도서: ${ctx.bookTitle || '제목미설정'} / 챕터: ${ctx.chaptersCount}개 / 작성: ${ctx.writtenChars.toLocaleString()}자]\n\n${message}`;
+    const gsResult = await genspark.generate(prompt, 120000);
+    if (gsResult.success) {
+      io.emit('gemini:chat-response', { message: gsResult.text });
+      return res.json({ success: true, response: gsResult.text });
+    }
   }
+
+  let result;
+  if (gemini.isReady()) result = await gemini.chat(message, ctx);
+  if (!result?.success && claude.isReady()) result = await claude.chat(message, ctx);
+  if (!result) return res.json({ success: false, message: 'AI가 연결되지 않음 — Genspark를 연결하세요' });
   res.json(result);
 });
 
@@ -320,7 +598,7 @@ app.post('/api/writing-prompt', (req, res) => {
   const ch = state.chapters.find(c => c.id === parseInt(chapterId));
   if (!ch) return res.json({ success: false, message: '챕터 없음' });
   const contextBlock = context.buildContextBlock(ch.id);
-  const prompt = PromptBuilder.build(ch, state.bookBible, contextBlock, ch.id);
+  const prompt = PromptBuilder.build(ch, getBookBible(), contextBlock, ch.id);
   ch.prompt = prompt;
   res.json({ success: true, prompt, chapter: { id: ch.id, title: ch.title } });
 });
@@ -377,7 +655,7 @@ app.post('/api/chapters/:id/write', async (req, res) => {
   if (!claude.isReady()) return res.json({ success: false, message: 'Claude API 키를 먼저 설정하세요' });
 
   const contextBlock = context.buildContextBlock(ch.id);
-  const prompt = PromptBuilder.build(ch, state.bookBible, contextBlock, ch.id);
+  const prompt = PromptBuilder.build(ch, getBookBible(), contextBlock, ch.id);
 
   res.json({ success: true, message: '집필 시작' });
 
@@ -385,12 +663,10 @@ app.post('/api/chapters/:id/write', async (req, res) => {
   if (result.success) {
     ch.content = result.content; ch.writtenChars = result.chars; ch.status = 'done';
     state.totalWritten = state.chapters.reduce((s, c) => s + (c.writtenChars || 0), 0);
-    const summary = await gemini.summarizeChapter(ch, result.content);
+    const summary = await (gemini.isReady() ? gemini : claude).summarizeChapter(ch, result.content);
     ch.chapterSummary = summary;
     context.saveChapterSummary(ch.id, summary);
-    if (gdocs.isReady()) await gdocs.saveChapter(ch, result.content);
-    SessionManager.saveChapterContent(ch.id, result.content);
-    SessionManager.save();
+    await saveChapterAuto(ch, result.content);   // 자동 저장 (없으면 자동 생성)
     io.emit('chapter:done', { id, title: ch.title, chars: result.chars, totalWritten: state.totalWritten });
   }
 });
@@ -458,7 +734,9 @@ app.post('/api/book/title', async (req, res) => {
   const { title } = req.body;
   if (!title?.trim()) return res.json({ success: false });
   state.bookTitle = title.trim();
-  if (state.bookBible) state.bookBible.title = state.bookTitle;
+  // bookBible 항상 갱신
+  getBookBible().title = state.bookTitle;
+  context.bookTitle    = state.bookTitle;
   const renamed = await gdocs.renameDoc(`[집필중] ${state.bookTitle}`);
   SessionManager.save();
   io.emit('book:title-updated', { title: state.bookTitle });
@@ -487,6 +765,8 @@ function restoreSession() {
   state.bookTitle    = saved.bookTitle    || '';
   state.bookBible    = saved.bookBible    || null;
   state.totalWritten = saved.totalWritten || 0;
+  // bookBible 항상 유효하게
+  getBookBible(); // 없으면 자동 생성, title 동기화
   state.masterDocId  = saved.masterDocId  || null;
   state.targetDocId  = saved.targetDocId  || null;
 

@@ -79,7 +79,9 @@ class AutoWriter {
 
         // 컨텍스트 블록 생성
         const contextBlock = this.context.buildContextBlock(ch.id);
-        const prompt = PromptBuilder.build(ch, this.bookBible, contextBlock, ch.id);
+        const bible = this.bookBible || { title: '도서', characters:[], themes:[], keywords:[], prohibitedWords:[], writingStyle:'' };
+        if (!bible.title) bible.title = '도서';
+        const prompt = PromptBuilder.build(ch, bible, contextBlock, ch.id);
 
         // Claude 호출
         const result = await this.claude.writeChapter(prompt, ch.targetChars, ch.id);
@@ -101,16 +103,22 @@ class AutoWriter {
         this.doneCount++;
 
         // 챕터 요약 생성
-        const summary = await this.gemini.summarizeChapter(ch, result.content);
+        const summarizer = this.gemini.isReady() ? this.gemini : this.claude;
+        const summary = await summarizer.summarizeChapter(ch, result.content);
         ch.chapterSummary = summary;
         this.context.saveChapterSummary(ch.id, summary);
 
-        // Google Docs 저장
+        // Google Docs 자동 저장 (없으면 자동 생성)
+        if (!this.gdocs.isReady()) {
+          const title = this.bookBible?.title || '도서집필도우미_자동저장';
+          await this.gdocs.createOrReuseDoc(title);
+        }
         if (this.gdocs.isReady()) {
           await this.gdocs.saveChapter(ch, result.content);
         }
 
         // 세션 저장
+        this.session.saveChapterContent(ch.id, result.content);
         this.session.save();
 
         // 진행률 계산

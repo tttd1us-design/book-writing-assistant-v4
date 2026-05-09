@@ -1,42 +1,13 @@
 /**
- * Genspark 컨트롤러 v4.1 — 안정화 재작성
+ * Genspark 컨트롤러 v5 — 셀렉터 없는 범용 방식
  *
  * 핵심 전략:
- * 1. insertText API로 입력 (clipboard 불필요)
- * 2. 프롬프트 전송 전 페이지 텍스트를 스냅샷 → 이후 diff로 새 응답만 추출
- * 3. Stop 버튼 소멸 + 텍스트 안정화로 완료 감지
- * 4. 로그인 대기 (최대 90초)
+ * 1. networkidle까지 완전 로딩 대기
+ * 2. 화면 하단 클릭 → 키보드로 바로 입력 (DOM 구조 무관)
+ * 3. 전송 전 페이지 텍스트 스냅샷 → diff로 새 응답 추출
+ * 4. Stop 버튼 또는 텍스트 안정화로 완료 감지
  */
 const { chromium } = require('playwright');
-
-const INPUT_SELECTORS = [
-  'textarea[data-lexical-editor]',
-  'div[contenteditable="true"][data-lexical-editor]',
-  '#prompt-textarea',
-  'textarea[placeholder*="Message"]',
-  'textarea[placeholder*="message"]',
-  'textarea[placeholder*="입력"]',
-  'div[contenteditable="true"]',
-  '[role="textbox"]',
-  'textarea',
-];
-
-const SEND_SELECTORS = [
-  'button[data-testid="send-button"]',
-  'button[aria-label*="Send"]',
-  'button[aria-label*="send"]',
-  'button[aria-label*="전송"]',
-  'form button[type="submit"]',
-  'button.send',
-];
-
-const STOP_SELECTORS = [
-  'button[aria-label*="Stop"]',
-  'button[aria-label*="stop"]',
-  'button[data-testid="stop-button"]',
-  '[class*="stop-button"]',
-  'button[aria-label*="중지"]',
-];
 
 class GensparkController {
   constructor(io) {
@@ -46,12 +17,11 @@ class GensparkController {
     this.connected   = false;
     this.sessionUrl  = null;
     this.lastText    = '';
-    this.stableMs    = 4000;
     this._monTimer   = null;
     this._ssTimer    = null;
     this._generating = false;
     this.onComplete  = null;
-    this._snapshotText = ''; // 프롬프트 전송 전 스냅샷
+    this._snapshotText = '';
   }
 
   emit(ev, data) { if (this.io) this.io.emit(ev, data); }
@@ -60,25 +30,38 @@ class GensparkController {
   async connect(url) {
     try {
       this.emit('genspark:status', { status: 'connecting', message: '브라우저 시작 중...' });
+
       this.browser = await chromium.launch({
         headless: false,
-        args: ['--no-sandbox', '--disable-blink-features=AutomationControlled', '--window-size=1400,900'],
+        args: [
+          '--no-sandbox',
+          '--disable-blink-features=AutomationControlled',
+          '--window-size=1400,900',
+          '--start-maximized',
+        ],
       });
+
       const ctx = await this.browser.newContext({
         viewport: { width: 1400, height: 900 },
         userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
       });
+
       this.page = await ctx.newPage();
       this.sessionUrl = url;
 
-      this.emit('genspark:status', { status: 'navigating', message: `페이지 로딩 중...` });
-      await this.page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
+      this.emit('genspark:status', { status: 'navigating', message: '페이지 로딩 중 (완전 로딩 대기)...' });
 
-      this.emit('genspark:status', { status: 'waiting', message: '입력창 대기 중... (로그인이 필요하면 직접 로그인 후 대기)' });
-      const ready = await this._waitForInput(90000);
-      if (!ready) {
-        this.emit('genspark:status', { status: 'waiting', message: '입력창을 찾지 못했지만 계속 진행합니다' });
-      }
+      // networkidle까지 완전히 기다림
+      await this.page.goto(url, { waitUntil: 'networkidle', timeout: 60000 })
+        .catch(() => this.page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 }));
+
+      // React 렌더링 완료까지 추가 대기
+      await this.page.waitForTimeout(3000);
+
+      this.emit('genspark:status', { status: 'waiting', message: '로그인이 필요하면 브라우저에서 직접 로그인하세요 (90초 대기)' });
+
+      // 입력창 찾을 때까지 대기 (최대 90초)
+      await this._waitForReady(90000);
 
       this.connected = true;
       this.emit('genspark:status', { status: 'connected', message: 'Genspark 연결 완료 ✅' });
@@ -91,205 +74,191 @@ class GensparkController {
     }
   }
 
-  // ── 입력창 대기 ──────────────────────────────────────
-  async _waitForInput(ms = 60000) {
+  // ── 페이지 준비 대기 ─────────────────────────────────
+  async _waitForReady(ms = 90000) {
     const end = Date.now() + ms;
     while (Date.now() < end) {
-      const el = await this._findInput();
-      if (el) return true;
+      // 입력 가능한 요소가 하나라도 있으면 OK
+      const hasInput = await this.page.evaluate(() => {
+        const inputs = document.querySelectorAll(
+          'textarea, [contenteditable="true"], [contenteditable=""], [role="textbox"], input[type="text"]'
+        );
+        return [...inputs].some(el => el.offsetParent !== null);
+      }).catch(() => false);
+
+      if (hasInput) return true;
       await this.page.waitForTimeout(1500);
     }
     return false;
   }
 
-  // ── 페이지 DOM 진단 (디버그용) ──────────────────────
-  async diagnose() {
-    if (!this.page) return;
-    try {
-      const info = await this.page.evaluate(() => {
-        const inputs = [
-          ...document.querySelectorAll('textarea, input[type="text"], [contenteditable="true"], [role="textbox"]')
-        ].map(el => ({
-          tag: el.tagName,
-          type: el.type || '',
-          role: el.getAttribute('role') || '',
-          contenteditable: el.getAttribute('contenteditable') || '',
-          placeholder: el.getAttribute('placeholder') || '',
-          class: el.className?.substring(0, 60) || '',
-          id: el.id || '',
-          visible: el.offsetParent !== null,
-          rect: (() => { const r = el.getBoundingClientRect(); return `${Math.round(r.x)},${Math.round(r.y)} ${Math.round(r.width)}x${Math.round(r.height)}`; })(),
-        }));
-        return inputs;
-      });
-      this.emit('genspark:diagnose', { elements: info });
-      console.log('[Genspark 진단] 입력 요소:', JSON.stringify(info, null, 2));
-    } catch (err) {
-      console.error('[Genspark 진단 실패]', err.message);
-    }
-  }
-
-  // ── 입력창 찾기 (다양한 전략) ────────────────────────
-  async _findInput() {
-    if (!this.page) return null;
-
-    // 전략 1: 알려진 셀렉터
-    for (const sel of INPUT_SELECTORS) {
-      try {
-        const el = await this.page.$(sel);
-        if (el && await el.isVisible()) return el;
-      } catch (_) {}
-    }
-
-    // 전략 2: contenteditable 전체 (Genspark 방식)
-    try {
-      const els = await this.page.$$('[contenteditable]');
-      for (const el of [...els].reverse()) {
-        try {
-          if (await el.isVisible()) return el;
-        } catch (_) {}
-      }
-    } catch (_) {}
-
-    // 전략 3: role=textbox
-    try {
-      const els = await this.page.$$('[role="textbox"]');
-      for (const el of els) {
-        try { if (await el.isVisible()) return el; } catch (_) {}
-      }
-    } catch (_) {}
-
-    // 전략 4: 화면 하단 여러 위치 클릭 후 포커스 확인
-    try {
-      const vp = this.page.viewportSize();
-      const { width, height } = vp || { width: 1400, height: 900 };
-      const clickPoints = [
-        [width * 0.5, height - 60],
-        [width * 0.5, height - 100],
-        [width * 0.5, height - 150],
-        [width * 0.5, height * 0.85],
-      ];
-      for (const [x, y] of clickPoints) {
-        await this.page.mouse.click(x, y);
-        await this.page.waitForTimeout(300);
-        const ok = await this.page.evaluate(() => {
-          const el = document.activeElement;
-          return el && (el.tagName === 'TEXTAREA' || el.isContentEditable || el.tagName === 'INPUT' || el.getAttribute('role') === 'textbox');
-        });
-        if (ok) return 'focused';
-      }
-    } catch (_) {}
-
-    // 전략 5: Tab 키로 입력창 탐색
-    try {
-      await this.page.keyboard.press('Tab');
-      await this.page.waitForTimeout(200);
-      for (let i = 0; i < 15; i++) {
-        const ok = await this.page.evaluate(() => {
-          const el = document.activeElement;
-          return el && (el.tagName === 'TEXTAREA' || el.isContentEditable || el.tagName === 'INPUT');
-        });
-        if (ok) return 'focused';
-        await this.page.keyboard.press('Tab');
-        await this.page.waitForTimeout(150);
-      }
-    } catch (_) {}
-
-    return null;
-  }
-
-  // ── 현재 페이지 전체 텍스트 스냅샷 ─────────────────
+  // ── 페이지 전체 텍스트 스냅샷 ──────────────────────
   async _getPageText() {
     if (!this.page) return '';
     try {
-      return await this.page.evaluate(() => document.body.innerText || '');
+      return await this.page.evaluate(() => {
+        // 메인 콘텐츠 영역만 추출 (버튼, 메뉴 등 제외)
+        const main = document.querySelector('main, [role="main"], #root, .app') || document.body;
+        return main.innerText || document.body.innerText || '';
+      });
     } catch (_) { return ''; }
   }
 
-  // ── 프롬프트 전송 ────────────────────────────────────
+  // ── 프롬프트 전송 (좌표 기반 클릭 + 키보드 직접 입력) ──
   async sendMessage(promptText) {
     if (!this.connected || !this.page) return { success: false, message: 'Genspark 미연결' };
+
     try {
       this.emit('genspark:sending', { preview: promptText.substring(0, 100) + '...' });
       this.lastText    = '';
       this._generating = true;
 
-      // 전송 전 페이지 텍스트 스냅샷 저장
+      // 전송 전 스냅샷
       this._snapshotText = await this._getPageText();
 
-      // 입력창 찾기 (재시도 3회)
-      let input = null;
-      for (let attempt = 0; attempt < 3; attempt++) {
-        input = await this._findInput();
-        if (input) break;
-        await this.page.waitForTimeout(2000);
-        this.emit('genspark:status', { status: 'waiting', message: `입력창 탐색 중... (${attempt + 1}/3)` });
-      }
-      if (!input) throw new Error('입력창을 찾을 수 없습니다 — Genspark 브라우저에서 채팅창이 보이는지 확인하세요');
+      const vp = this.page.viewportSize() || { width: 1400, height: 900 };
 
-      // 입력창 클릭 & 포커스
-      if (input !== 'focused') {
-        try { await input.click({ force: true }); } catch (_) {}
-      }
-      await this.page.waitForTimeout(500);
+      // ── STEP 1: 하단 입력창 클릭 ──
+      let clicked = false;
 
-      // 기존 내용 전체 선택 후 삭제
+      // 방법 A: 알려진 요소 직접 클릭
+      const inputFound = await this.page.evaluate(() => {
+        const selectors = [
+          'textarea',
+          '[contenteditable="true"]',
+          '[contenteditable=""]',
+          '[role="textbox"]',
+          'input[type="text"]',
+        ];
+        for (const sel of selectors) {
+          const els = [...document.querySelectorAll(sel)];
+          const visible = els.filter(el => el.offsetParent !== null);
+          if (visible.length > 0) {
+            const last = visible[visible.length - 1];
+            last.click();
+            last.focus();
+            return true;
+          }
+        }
+        return false;
+      }).catch(() => false);
+
+      if (inputFound) {
+        clicked = true;
+        await this.page.waitForTimeout(400);
+      }
+
+      // 방법 B: 화면 하단 여러 위치 클릭
+      if (!clicked) {
+        const positions = [
+          { x: vp.width * 0.5, y: vp.height - 65 },
+          { x: vp.width * 0.5, y: vp.height - 100 },
+          { x: vp.width * 0.5, y: vp.height - 140 },
+          { x: vp.width * 0.5, y: vp.height * 0.88 },
+          { x: vp.width * 0.5, y: vp.height * 0.92 },
+        ];
+        for (const pos of positions) {
+          await this.page.mouse.click(pos.x, pos.y);
+          await this.page.waitForTimeout(300);
+          const focused = await this.page.evaluate(() => {
+            const el = document.activeElement;
+            return el && el !== document.body && (
+              el.tagName === 'TEXTAREA' ||
+              el.tagName === 'INPUT' ||
+              el.isContentEditable ||
+              el.getAttribute('role') === 'textbox'
+            );
+          }).catch(() => false);
+          if (focused) { clicked = true; break; }
+        }
+      }
+
+      // 방법 C: Tab 키로 포커스 탐색
+      if (!clicked) {
+        for (let i = 0; i < 10; i++) {
+          await this.page.keyboard.press('Tab');
+          await this.page.waitForTimeout(150);
+          const ok = await this.page.evaluate(() => {
+            const el = document.activeElement;
+            return el && (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT' || el.isContentEditable);
+          }).catch(() => false);
+          if (ok) { clicked = true; break; }
+        }
+      }
+
+      // ── STEP 2: 기존 내용 지우기 ──
       await this.page.keyboard.press('Control+a');
       await this.page.waitForTimeout(200);
       await this.page.keyboard.press('Backspace');
       await this.page.waitForTimeout(200);
 
-      // 텍스트 입력 (3가지 방법 순차 시도)
-      const CHUNK = 5000;
-      let inputSuccess = false;
-
-      // 방법 1: insertText (가장 안정적)
-      try {
-        for (let i = 0; i < promptText.length; i += CHUNK) {
-          await this.page.keyboard.insertText(promptText.slice(i, i + CHUNK));
-          await this.page.waitForTimeout(80);
-        }
-        inputSuccess = true;
-      } catch (_) {}
-
-      // 방법 2: execCommand
-      if (!inputSuccess) {
-        try {
-          await this.page.evaluate((text) => {
-            const el = document.activeElement;
-            if (!el) return;
-            el.focus();
-            document.execCommand('selectAll');
-            document.execCommand('insertText', false, text.substring(0, 15000));
-          }, promptText);
-          inputSuccess = true;
-        } catch (_) {}
+      // ── STEP 3: 텍스트 입력 ──
+      // insertText 방식 (가장 빠르고 안정적)
+      const CHUNK = 4000;
+      for (let i = 0; i < promptText.length; i += CHUNK) {
+        await this.page.keyboard.insertText(promptText.slice(i, i + CHUNK));
+        await this.page.waitForTimeout(100);
       }
-
-      // 방법 3: Clipboard API
-      if (!inputSuccess) {
-        await this.page.evaluate(async (text) => {
-          try { await navigator.clipboard.writeText(text); } catch (_) {}
-        }, promptText.substring(0, 15000));
-        await this.page.keyboard.press('Control+v');
-      }
-
       await this.page.waitForTimeout(600);
 
-      // 전송: 버튼 클릭 → Enter → Ctrl+Enter 순으로 시도
+      // 입력 확인 — 텍스트가 실제로 입력됐는지 체크
+      const inputted = await this.page.evaluate(() => {
+        const el = document.activeElement;
+        if (!el) return false;
+        return (el.value || el.innerText || el.textContent || '').length > 10;
+      }).catch(() => false);
+
+      // 입력 실패 시 execCommand로 재시도
+      if (!inputted) {
+        await this.page.evaluate((text) => {
+          const el = document.activeElement;
+          if (!el) return;
+          try {
+            el.focus();
+            document.execCommand('selectAll');
+            document.execCommand('insertText', false, text.substring(0, 12000));
+          } catch (_) {
+            if (el.value !== undefined) el.value = text.substring(0, 12000);
+          }
+        }, promptText);
+        await this.page.waitForTimeout(400);
+      }
+
+      // ── STEP 4: 전송 ──
       let sent = false;
-      for (const sel of SEND_SELECTORS) {
-        try {
-          const btn = await this.page.$(sel);
-          if (btn && await btn.isVisible()) { await btn.click(); sent = true; break; }
-        } catch (_) {}
-      }
+
+      // 전송 버튼 클릭 시도
+      sent = await this.page.evaluate(() => {
+        const btnSelectors = [
+          'button[data-testid="send-button"]',
+          'button[aria-label*="Send"]',
+          'button[type="submit"]',
+          'button.send',
+          '[class*="send"][class*="btn"]',
+          '[class*="submit"]',
+        ];
+        for (const sel of btnSelectors) {
+          const btn = document.querySelector(sel);
+          if (btn && btn.offsetParent !== null) {
+            btn.click();
+            return true;
+          }
+        }
+        // 아이콘 버튼 중 입력창 옆 마지막 버튼
+        const allBtns = [...document.querySelectorAll('button')];
+        const visibleBtns = allBtns.filter(b => b.offsetParent !== null);
+        if (visibleBtns.length > 0) {
+          visibleBtns[visibleBtns.length - 1].click();
+          return true;
+        }
+        return false;
+      }).catch(() => false);
+
       if (!sent) {
-        // Enter 시도
         await this.page.keyboard.press('Enter');
-        // 전송됐는지 1초 후 확인 (입력창이 비워지면 성공)
-        await this.page.waitForTimeout(1000);
       }
+
+      await this.page.waitForTimeout(1000);
 
       this.emit('genspark:sent', { message: '전송 완료 — AI 응답 대기 중...' });
       return { success: true };
@@ -300,34 +269,36 @@ class GensparkController {
     }
   }
 
-  // ── 응답 텍스트 추출 (스냅샷 diff 방식) ─────────────
+  // ── 새 응답 텍스트 추출 (스냅샷 diff) ──────────────
   async _extractNewResponse() {
     const full = await this._getPageText();
-    if (!full || full.length <= this._snapshotText.length) return '';
+    if (!full || full.length <= this._snapshotText.length + 50) return '';
 
-    // 스냅샷 이후 새로 추가된 텍스트
+    // 스냅샷 이후 추가된 텍스트
     const newPart = full.slice(this._snapshotText.length).trim();
-    if (newPart.length < 50) return '';
 
-    // UI 텍스트 제거 (버튼명, 네비 등 짧은 줄 제거)
-    const lines = newPart.split('\n')
-      .map(l => l.trim())
-      .filter(l => l.length > 0);
+    // 너무 짧으면 무시
+    if (newPart.length < 80) return '';
 
-    // 연속된 긴 줄들만 취합 (실제 집필 내용)
-    const content = lines.join('\n');
-    return content;
+    // UI 텍스트(짧은 줄들) 필터링
+    const lines = newPart.split('\n');
+    const contentLines = lines.filter(l => l.trim().length > 3);
+    return contentLines.join('\n').trim();
   }
 
   // ── Stop 버튼 감지 ───────────────────────────────────
   async _isGenerating() {
     if (!this.page) return false;
     try {
-      for (const sel of STOP_SELECTORS) {
-        const el = await this.page.$(sel);
-        if (el && await el.isVisible()) return true;
-      }
-      return false;
+      return await this.page.evaluate(() => {
+        const stopKw = ['stop', 'Stop', '중지', '멈춤', 'Cancel'];
+        const btns = [...document.querySelectorAll('button, [role="button"]')];
+        return btns.some(b => {
+          if (!b.offsetParent) return false;
+          const text = (b.innerText || b.getAttribute('aria-label') || '').toLowerCase();
+          return stopKw.some(k => text.includes(k.toLowerCase()));
+        });
+      });
     } catch (_) { return false; }
   }
 
@@ -350,7 +321,7 @@ class GensparkController {
           if (!generating && text.length > 100) {
             if (text.length === lastLen) {
               stable++;
-              if (stable >= 3) {
+              if (stable >= 4) {  // 8초간 변화 없음 = 완료
                 clearInterval(tick); clearTimeout(tout);
                 this._generating = false;
                 this.emit('genspark:response-complete', { content: text, length: text.length });
@@ -365,7 +336,11 @@ class GensparkController {
       const tout = setTimeout(() => {
         clearInterval(tick);
         this._generating = false;
-        resolve(this.lastText || '');
+        const finalText = this.lastText || '';
+        if (finalText.length > 100 && typeof this.onComplete === 'function') {
+          this.onComplete(finalText);
+        }
+        resolve(finalText);
       }, timeoutMs);
     });
   }
@@ -382,7 +357,7 @@ class GensparkController {
           this.emit('genspark:streaming', { content: text, length: text.length, preview: text.slice(-500) });
         }
       } catch (_) {}
-    }, 2000);
+    }, 2500);
   }
 
   // ── 스크린샷 스트림 ──────────────────────────────────
@@ -391,10 +366,100 @@ class GensparkController {
     this._ssTimer = setInterval(async () => {
       if (!this.connected || !this.page) return;
       try {
-        const buf = await this.page.screenshot({ type: 'jpeg', quality: 50 });
+        const buf = await this.page.screenshot({ type: 'jpeg', quality: 50, fullPage: false });
         this.emit('genspark:screenshot', { image: buf.toString('base64') });
       } catch (_) {}
     }, 1500);
+  }
+
+  // ── 단발성 생성: 프롬프트 보내고 완성된 응답 반환 ────
+  async generate(promptText, timeoutMs = 300000) {
+    if (!this.connected) return { success: false, message: 'Genspark 미연결' };
+
+    this.emit('genspark:generating', { message: '생성 중...' });
+
+    // 채팅 초기화 후 전송
+    await this.clearForNewSession();
+    await this.page?.waitForTimeout(1500);
+
+    const sendResult = await this.sendMessage(promptText);
+    if (!sendResult.success) return { success: false, message: sendResult.message };
+
+    const text = await this.waitForResponse(timeoutMs);
+    if (!text || text.length < 50) return { success: false, message: '응답이 비어있습니다' };
+
+    this.emit('genspark:generated', { length: text.length });
+    return { success: true, text };
+  }
+
+  // ── 진단 ─────────────────────────────────────────────
+  async diagnose() {
+    if (!this.page) return;
+    try {
+      const info = await this.page.evaluate(() => {
+        const inputs = [
+          ...document.querySelectorAll('textarea, input, [contenteditable], [role="textbox"]')
+        ].map(el => ({
+          tag: el.tagName, type: el.type || '',
+          role: el.getAttribute('role') || '',
+          contenteditable: el.getAttribute('contenteditable') || '',
+          placeholder: el.placeholder || el.getAttribute('placeholder') || '',
+          class: (el.className || '').substring(0, 60),
+          id: el.id || '',
+          visible: el.offsetParent !== null,
+          rect: (() => { const r = el.getBoundingClientRect(); return `${Math.round(r.x)},${Math.round(r.y)} ${Math.round(r.width)}x${Math.round(r.height)}`; })(),
+        }));
+        return { inputs, url: location.href, title: document.title };
+      });
+      this.emit('genspark:diagnose', info);
+    } catch (err) {
+      this.emit('genspark:error', { message: `진단 실패: ${err.message}` });
+    }
+  }
+
+  // ── 모델 선택 ────────────────────────────────────────
+  async selectModel(modelName) {
+    if (!this.connected || !this.page) return { success: false, message: '연결되지 않음' };
+    try {
+      this.emit('genspark:status', { status: 'model-select', message: `모델 선택 중: ${modelName}` });
+
+      const modelMap = {
+        'claude-opus-4.6':  ['Opus 4.6', 'Claude Opus 4.6'],
+        'claude-opus-4.5':  ['Opus 4.5', 'Claude Opus 4.5'],
+        'claude-opus-4':    ['Opus 4', 'Claude Opus 4'],
+        'claude-sonnet-4.5':['Sonnet 4.5', 'Claude Sonnet 4.5'],
+        'claude-sonnet-4':  ['Sonnet 4', 'Claude Sonnet 4'],
+        'claude-haiku-4':   ['Haiku 4', 'Claude Haiku 4'],
+        'claude-opus-3.7':  ['Opus 3.7', 'Claude Opus 3.7'],
+        'claude-3.5-sonnet':['3.5 Sonnet', 'Claude 3.5 Sonnet'],
+      };
+
+      const keywords = modelMap[modelName] || [modelName];
+
+      // 모델 선택 버튼 찾기 (텍스트에 Claude 포함)
+      const clicked = await this.page.evaluate((kws) => {
+        const all = [...document.querySelectorAll('button, [role="option"], [role="menuitem"], li, [class*="model"]')];
+        for (const el of all) {
+          const text = el.innerText || el.textContent || '';
+          if (kws.some(k => text.includes(k))) {
+            el.click();
+            return true;
+          }
+        }
+        return false;
+      }, keywords);
+
+      if (clicked) {
+        await this.page.waitForTimeout(500);
+        this.emit('genspark:model-selected', { model: modelName, message: `모델 변경: ${modelName}` });
+        return { success: true };
+      }
+
+      this.emit('genspark:model-select-fail', { message: `Genspark 브라우저에서 직접 모델을 선택해주세요.` });
+      return { success: false, message: '모델 버튼 없음 — 직접 선택' };
+    } catch (err) {
+      return { success: false, message: err.message };
+    }
   }
 
   async takeScreenshot() {
@@ -403,112 +468,14 @@ class GensparkController {
     catch (_) { return null; }
   }
 
-  // ── Genspark 내 Claude 모델 선택 ────────────────────
-  async selectModel(modelName) {
-    if (!this.connected || !this.page) return { success: false, message: '연결되지 않음' };
-    try {
-      this.emit('genspark:status', { status: 'model-select', message: `모델 선택 중: ${modelName}` });
-
-      // Genspark 모델 선택 버튼/드롭다운 패턴들
-      const modelBtnSelectors = [
-        '[class*="model-selector"]',
-        '[class*="model-select"]',
-        '[data-testid*="model"]',
-        'button[aria-label*="model"]',
-        'button[aria-label*="Model"]',
-        '[class*="model-btn"]',
-        '[class*="ModelPicker"]',
-        'button:has-text("Claude")',
-        'button:has-text("claude")',
-        '[class*="llm-select"]',
-        '[class*="ai-model"]',
-      ];
-
-      // 모델 선택 버튼 찾기
-      let modelBtn = null;
-      for (const sel of modelBtnSelectors) {
-        try {
-          modelBtn = await this.page.$(sel);
-          if (modelBtn && await modelBtn.isVisible()) break;
-          modelBtn = null;
-        } catch (_) {}
-      }
-
-      // 버튼을 못 찾으면 텍스트로 찾기
-      if (!modelBtn) {
-        try {
-          modelBtn = await this.page.locator('button', { hasText: 'Claude' }).first();
-          if (!await modelBtn.isVisible()) modelBtn = null;
-        } catch (_) { modelBtn = null; }
-      }
-
-      if (!modelBtn) {
-        this.emit('genspark:model-select-fail', {
-          message: '모델 선택 버튼을 찾지 못했습니다. Genspark 브라우저 창에서 직접 선택해주세요.',
-        });
-        return { success: false, message: '모델 선택 버튼 없음 — 직접 선택해주세요' };
-      }
-
-      await modelBtn.click();
-      await this.page.waitForTimeout(800);
-
-      // 드롭다운에서 원하는 모델 클릭
-      const modelMap = {
-        'claude-opus-4.6':  ['Opus 4.6', 'opus-4.6', 'Claude Opus 4.6', 'Opus4.6'],
-        'claude-opus-4.5':  ['Opus 4.5', 'opus-4.5', 'Claude Opus 4.5', 'Opus4.5'],
-        'claude-opus-4':    ['Opus 4', 'opus-4', 'Claude Opus 4'],
-        'claude-sonnet-4.5':['Sonnet 4.5', 'sonnet-4.5', 'Claude Sonnet 4.5'],
-        'claude-sonnet-4':  ['Sonnet 4', 'sonnet-4', 'Claude Sonnet 4'],
-        'claude-haiku-4':   ['Haiku 4', 'haiku-4', 'Claude Haiku 4'],
-        'claude-opus-3.7':  ['Opus 3.7', 'opus-3.7', 'Claude Opus 3.7'],
-        'claude-sonnet-3.7':['Sonnet 3.7', 'sonnet-3.7', 'Claude Sonnet 3.7'],
-        'claude-3.5-sonnet':['3.5 Sonnet', 'claude-3-5-sonnet', 'Claude 3.5 Sonnet'],
-        'claude-3-opus':    ['Claude 3 Opus', 'claude-3-opus'],
-      };
-
-      const keywords = modelMap[modelName] || [modelName];
-      let selected = false;
-
-      for (const kw of keywords) {
-        try {
-          const item = await this.page.locator(`[role="option"], [role="menuitem"], li, button`, { hasText: kw }).first();
-          if (await item.isVisible()) {
-            await item.click();
-            selected = true;
-            break;
-          }
-        } catch (_) {}
-      }
-
-      if (!selected) {
-        // 드롭다운 닫기
-        await this.page.keyboard.press('Escape');
-        this.emit('genspark:model-select-fail', { message: `"${modelName}" 항목을 찾지 못했습니다. 직접 선택해주세요.` });
-        return { success: false, message: '모델 항목 없음' };
-      }
-
-      await this.page.waitForTimeout(500);
-      this.emit('genspark:model-selected', { model: modelName, message: `모델 변경 완료: ${modelName}` });
-      return { success: true };
-    } catch (err) {
-      this.emit('genspark:error', { message: `모델 선택 실패: ${err.message}` });
-      return { success: false, message: err.message };
-    }
-  }
-
   async clearForNewSession() {
     if (!this.page) return;
     try {
       this.lastText = '';
       this._snapshotText = '';
-      // 새 대화 버튼 시도
-      const newBtns = ['button[aria-label*="New"]', 'a[href*="/agents"]', '[class*="new-chat"]', '[class*="new-conversation"]'];
-      for (const sel of newBtns) {
-        const el = await this.page.$(sel);
-        if (el) { await el.click(); await this.page.waitForTimeout(1500); return; }
-      }
-      await this.page.reload({ waitUntil: 'domcontentloaded' });
-      await this._waitForInput(20000);
+      await this.page.reload({ waitUntil: 'networkidle' }).catch(() => {});
+      await this.page.waitForTimeout(2000);
+      await this._waitForReady(20000);
     } catch (_) {}
   }
 

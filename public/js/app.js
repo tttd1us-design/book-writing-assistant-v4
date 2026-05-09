@@ -46,16 +46,28 @@ socket.on('genspark:status', ({ status, message }) => {
   updateGsModalBadge(connected);
   if (connected) {
     state.gensparkConnected = true;
-    // 헤더 버튼 업데이트
     const btn = document.getElementById('gsHeaderBtn');
     if (btn) { btn.textContent = '🟢 Genspark 연결됨'; btn.style.background = 'rgba(76,175,122,0.25)'; }
-    showToast('Genspark 연결 완료', 'success');
+    showToast('🟢 Genspark 연결 완료 — 목차/스토리/채팅 모두 Genspark 사용', 'success');
     hideLoading();
+    updateAnalyzeBtnLabel(true);
   } else if (status === 'disconnected') {
     state.gensparkConnected = false;
     const btn = document.getElementById('gsHeaderBtn');
     if (btn) { btn.textContent = '🤖 Genspark 연결'; btn.style.background = 'rgba(76,175,122,0.15)'; }
+    updateAnalyzeBtnLabel(false);
   }
+});
+
+socket.on('genspark:generating', ({ message }) => { addLog(`🤖 Genspark: ${message}`, 'info'); });
+socket.on('genspark:generated', ({ length }) => { addLog(`✅ Genspark 생성 완료 — ${length.toLocaleString()}자`, 'success'); });
+
+socket.on('story:generated', ({ storyText, chapters }) => {
+  state.chapters = chapters;
+  hideLoading();
+  renderStory();
+  addLog('✅ Genspark 스토리텔링 생성 완료', 'success');
+  showToast('스토리텔링 생성 완료', 'success');
 });
 socket.on('genspark:sending',  ({ preview }) => { addLog(`📤 전송: ${preview.substring(0,60)}...`, 'info'); });
 socket.on('genspark:sent',     ({ message }) => { addLog(`✅ ${message}`, 'success'); });
@@ -71,29 +83,29 @@ socket.on('genspark:screenshot', ({ image }) => {
   if (mimg) { mimg.src = `data:image/jpeg;base64,${image}`; if (mimg.style.display === 'none') { mimg.style.display = 'block'; if (mph) mph.style.display = 'none'; } }
 });
 socket.on('genspark:streaming', ({ content, length }) => {
-  gsCurrentText = content;
-  writingContent = content;  // 집필 스트림에도 동기화
+  gsCurrentText  = content;
+  writingContent = content;
 
   const tail = content.length > 1500 ? '...\n\n' + content.substring(content.length - 1200) : content;
 
-  // ── Genspark 탭 ──
+  // Genspark 탭
   const tc = document.getElementById('gsTextContent');
   if (tc) { tc.textContent = tail; tc.scrollTop = tc.scrollHeight; }
   const lenEl = document.getElementById('gsTextLen');
   if (lenEl) lenEl.textContent = `${length.toLocaleString()}자`;
-
-  // ── 모달 ──
   const mt = document.getElementById('gsModalText');
   if (mt) { mt.textContent = tail; mt.scrollTop = mt.scrollHeight; }
   const ml = document.getElementById('gsModalLen');
   if (ml) ml.textContent = `${length.toLocaleString()}자`;
 
-  // ── 집필 스트림 탭 (미러링) ──
+  // 집필 스트림 탭 — 자동 전환 + 내용 표시
+  switchTab('write');
+  switchWriteTab('stream');   // 반드시 스트림 탭으로 전환
   const ws = document.getElementById('writingStream');
   if (ws) { ws.textContent = content; ws.scrollTop = ws.scrollHeight; }
   document.getElementById('wcChars').textContent = `${length.toLocaleString()}자`;
-  const target = state.chapters.find(c => c.id === state.currentChapterId)?.targetChars || 1;
-  const pct = Math.min(100, Math.round(length / target * 100));
+  const ch = state.chapters.find(c => c.id === state.currentChapterId);
+  const pct = ch?.targetChars ? Math.min(100, Math.round(length / ch.targetChars * 100)) : 0;
   document.getElementById('wcProgBar').style.width = `${pct}%`;
   document.getElementById('stopBtn').style.display = '';
 });
@@ -160,18 +172,19 @@ socket.on('chapter:done', ({ id, title, chars, totalWritten }) => {
   const ch = state.chapters.find(c => c.id === id);
   if (ch) { ch.status = 'done'; ch.writtenChars = chars; }
   state.totalWritten = totalWritten;
-  renderTOC(); updateStats();
-  addLog(`✅ ${title} — ${chars.toLocaleString()}자 → Google Docs 저장 완료`, 'success');
-  showToast(`💾 ${chars.toLocaleString()}자 Google Docs 저장 완료`, 'success');
-  // 저장 버튼 숨기기 (이미 자동 저장됨)
+  renderTOC(); updateStats(); renderStory();
+  addLog(`✅ ${title} — ${chars.toLocaleString()}자 Google Docs 자동 저장 완료`, 'success');
+  showToast(`💾 ${chars.toLocaleString()}자 자동 저장됨`, 'success');
   document.getElementById('saveContentBtn').style.display = 'none';
+  document.getElementById('streamSaveBar') && (document.getElementById('streamSaveBar').style.display = 'none');
 });
 
 socket.on('outline:generated', ({ chapters, bookTitle }) => {
   state.chapters = chapters;
-  if (bookTitle) { state.bookTitle = bookTitle; document.getElementById('bookTitle').textContent = bookTitle; }
-  renderTOC(); updateStats();
+  if (bookTitle) { state.bookTitle = bookTitle; syncTitle(); }
+  renderTOC(); updateStats(); renderStory();
   document.getElementById('tocStats').style.display = 'flex';
+  document.getElementById('tocProgress').style.display = '';
   hideLoading();
   isAnalyzing = false;
   setAnalyzeBtn(false);
@@ -180,7 +193,7 @@ socket.on('outline:generated', ({ chapters, bookTitle }) => {
 socket.on('outline:updated', ({ chapters }) => { state.chapters = chapters; renderTOC(); updateStats(); });
 socket.on('outline:reset',   () => { state.chapters = []; state.totalWritten = 0; renderTOC(); updateStats(); showToast('목차 초기화됨', 'info'); });
 
-socket.on('book:title-updated', ({ title }) => { state.bookTitle = title; document.getElementById('bookTitle').textContent = title; });
+socket.on('book:title-updated', ({ title }) => { state.bookTitle = title; syncTitle(); addLog(`📝 도서 제목: ${title}`, 'success'); });
 
 socket.on('auto:start',   () => { setAutoUI('running'); });
 socket.on('auto:paused',  () => { setAutoUI('paused');  addLog('일시정지', 'warn'); });
@@ -350,8 +363,30 @@ async function analyzeFromFile() {
 function setAnalyzeBtn(loading) {
   const btn  = document.getElementById('analyzeBtn');
   const fBtn = document.getElementById('analyzeFileBtn');
-  if (btn)  { btn.disabled  = loading; btn.textContent  = loading ? '⏳ 분석 중...' : '✦ URL 기획서 분석'; }
-  if (fBtn) { fBtn.disabled = loading; fBtn.textContent = loading ? '⏳ 분석 중...' : '✦ 파일 기획서 분석'; }
+  const label = state.gensparkConnected ? '🤖 Genspark' : '✦ AI';
+  if (btn)  { btn.disabled  = loading; btn.textContent  = loading ? '⏳ 분석 중...' : `${label} URL 기획서 분석`; }
+  if (fBtn) { fBtn.disabled = loading; fBtn.textContent = loading ? '⏳ 분석 중...' : `${label} 파일 기획서 분석`; }
+}
+
+function updateAnalyzeBtnLabel(gsConnected) {
+  if (!isAnalyzing) setAnalyzeBtn(false);
+  const label = gsConnected ? '🤖 Genspark' : '✦ AI';
+  const hint  = document.getElementById('analyzeHint');
+  if (hint) hint.textContent = gsConnected ? 'Genspark(Claude Opus 4.6) 사용 중' : 'Gemini/Claude 사용';
+  // 분석 버튼 스타일 변경
+  const btns = [document.getElementById('analyzeBtn'), document.getElementById('analyzeFileBtn')];
+  btns.forEach(b => {
+    if (!b) return;
+    if (gsConnected) {
+      b.style.background = 'linear-gradient(135deg,#1a4a2a,#2d7a3a)';
+      b.style.border = '1px solid rgba(76,175,122,0.6)';
+      b.style.color = '#fff';
+    } else {
+      b.style.background = '';
+      b.style.border = '';
+      b.style.color = '';
+    }
+  });
 }
 
 // ════════════════════════════════════════════════════
@@ -376,6 +411,8 @@ async function processFile(file) {
     fl.innerHTML = `<div class="file-item"><span>📄</span><span class="file-item-name">${esc(file.name)}</span><span class="file-item-status done">✅ ${r.chars.toLocaleString()}자</span></div>`;
     document.getElementById('analyzeFileBtn').style.display = '';
     showToast(`${file.name} 파싱 완료 (${r.chars.toLocaleString()}자)`, 'success');
+    // 기획서 탭에 내용 표시
+    showPlanningDoc(r.text, file.name);
   } else {
     fl.innerHTML = `<div class="file-item"><span>📄</span><span class="file-item-name">${esc(file.name)}</span><span class="file-item-status error">❌ ${r.message}</span></div>`;
     showToast(r.message, 'error');
@@ -496,7 +533,8 @@ async function confirmTitle() {
   if (!title) { cancelTitle(); return; }
   cancelTitle();
   const r = await post('/api/book/title', { title });
-  if (!r.success) showToast('제목 변경 실패', 'error');
+  if (r.success) { state.bookTitle = title; syncTitle(); showToast(`📝 제목: ${title}`, 'success'); }
+  else showToast('제목 변경 실패', 'error');
 }
 
 // ════════════════════════════════════════════════════
@@ -505,18 +543,32 @@ async function confirmTitle() {
 
 function renderTOC() {
   const body   = document.getElementById('tocBody');
-  const search = document.getElementById('tocSearch')?.value?.toLowerCase() || '';
+  if (!body) return;
+  const search = (document.getElementById('tocSearch')?.value || '').toLowerCase();
   const filter = document.getElementById('tocFilter')?.value || '';
 
+  // 통계 업데이트
+  const doneCnt    = state.chapters.filter(c => c.status === 'done').length;
+  const writingCnt = state.chapters.filter(c => c.status === 'writing').length;
+  const pendingCnt = state.chapters.filter(c => c.status !== 'done' && c.status !== 'writing').length;
+  document.getElementById('tsDone').textContent    = doneCnt;
+  document.getElementById('tsWriting').textContent = writingCnt;
+  document.getElementById('tsPending').textContent = pendingCnt;
+  document.getElementById('tsTotal').textContent   = state.chapters.length;
+
+  if (!state.chapters.length) {
+    body.innerHTML = `<div class="toc-empty-msg"><div style="font-size:32px;margin-bottom:8px">📖</div><div style="font-weight:700;margin-bottom:4px">목차 없음</div><div style="color:var(--dim);font-size:11px">기획서를 분석하면 목차가 표시됩니다</div></div>`;
+    return;
+  }
+
+  // 필터링
   const chs = state.chapters.filter(c =>
-    (!search || c.title.toLowerCase().includes(search)) &&
+    (!search || c.title.toLowerCase().includes(search) || (c.summary||'').toLowerCase().includes(search)) &&
     (!filter || c.type === filter)
   );
 
-  document.getElementById('chapCount').textContent = `${state.chapters.length}챕터`;
-
   if (!chs.length) {
-    body.innerHTML = `<div class="toc-empty"><div style="font-size:28px">📖</div><div>${state.chapters.length ? '검색 결과 없음' : '기획서를 분석하면\n목차가 표시됩니다'}</div></div>`;
+    body.innerHTML = `<div class="toc-empty-msg"><div style="color:var(--dim)">검색 결과 없음</div></div>`;
     return;
   }
 
@@ -524,66 +576,149 @@ function renderTOC() {
   const parts = {};
   chs.forEach(ch => { const k = ch.partNum ?? 0; if (!parts[k]) parts[k] = []; parts[k].push(ch); });
 
-  const pNames = ['프롤로그', 'PART 1', 'PART 2', 'PART 3', 'PART 4', '에필로그'];
+  const pNames = { 0:'프롤로그', 1:'PART 1', 2:'PART 2', 3:'PART 3', 4:'PART 4', 5:'에필로그' };
   const siMap  = { done:'✅', writing:'✍️', error:'❌', pending:'○' };
 
   let html = '';
-  for (const [pn, items] of Object.entries(parts).sort((a,b) => +a[0] - +b[0])) {
-    const done   = items.filter(c => c.status === 'done').length;
-    const partSel = items.every(c => selectedIds.has(c.id));
+  for (const [pn, items] of Object.entries(parts).sort((a,b) => +a[0]-+b[0])) {
+    const p       = +pn;
+    const donePart = items.filter(c=>c.status==='done').length;
+    const totalTarget = items.reduce((s,c) => s+(c.targetChars||0), 0);
+    const totalWritten = items.reduce((s,c) => s+(c.writtenChars||0), 0);
+    const pct = totalTarget ? Math.round(totalWritten/totalTarget*100) : 0;
+    const partSel = items.length > 0 && items.every(c => selectedIds.has(c.id));
     const partInd = !partSel && items.some(c => selectedIds.has(c.id));
-    html += `<div class="toc-part">
-      <div class="toc-part-header" onclick="togglePartSel(${+pn})" style="cursor:pointer">
-        <input type="checkbox" ${partSel?'checked':''} ${partInd?'data-ind="true"':''}
-               style="accent-color:var(--gold);width:11px;height:11px;flex-shrink:0"
-               onclick="event.stopPropagation();togglePartSel(${+pn})">
-        <span class="toc-part-label">${pNames[+pn] || `PART ${pn}`}</span>
-        <span class="toc-part-stat">${done}/${items.length}</span>
-      </div>
-      <div class="toc-items">`;
-    items.forEach(ch => {
-      const active = ch.id === state.currentChapterId;
-      const sel    = selectedIds.has(ch.id);
-      html += `<div class="toc-item ${ch.status||'pending'} ${active?'active':''} ${sel?'selected':''}"
-                data-id="${ch.id}" onclick="handleTocClick(event,${ch.id})">
-        <input type="checkbox" ${sel?'checked':''}
-               style="accent-color:var(--gold);width:11px;height:11px;flex-shrink:0"
-               onclick="event.stopPropagation();toggleSel(${ch.id})">
-        <span class="toc-item-si">${siMap[ch.status||'pending']}</span>
-        <span class="toc-item-num">${ch.num}</span>
-        <span class="toc-item-title" title="${esc(ch.title)}">${esc(ch.title)}</span>
-        ${ch.writtenChars ? `<span style="font-size:9px;color:var(--dim)">${(ch.writtenChars/1000).toFixed(1)}k</span>` : ''}
-        <span class="toc-item-type ${ch.type}">${ch.type}</span>
-        <button class="toc-item-write-btn" onclick="event.stopPropagation();writeChapter(${ch.id})">${ch.status==='done'?'🔄':'▶'}</button>
+
+    html += `<div class="toc-part-hdr">
+      <input type="checkbox" ${partSel?'checked':''} ${partInd?'data-ind="true"':''}
+             onclick="togglePartSel(${p})">
+      <span class="toc-part-name">${pNames[p]||`PART ${p}`}</span>
+      <span class="toc-part-stats">${donePart}/${items.length} · ${(totalTarget/10000).toFixed(1)}만자 · ${pct}%</span>
+    </div>`;
+
+    for (const ch of items) {
+      const active  = ch.id === state.currentChapterId;
+      const sel     = selectedIds.has(ch.id);
+      const si      = siMap[ch.status||'pending'];
+      const pctCh   = ch.targetChars ? Math.min(100,Math.round((ch.writtenChars||0)/ch.targetChars*100)) : 0;
+      const writtenK = ch.writtenChars ? `${(ch.writtenChars/1000).toFixed(1)}k` : '0';
+      const targetK  = ch.targetChars  ? `${(ch.targetChars /1000).toFixed(0)}k` : '';
+
+      html += `<div class="toc-ch ${ch.status||'pending'} ${active?'active':''} ${sel?'selected':''}"
+               data-id="${ch.id}" onclick="handleTocClick(event,${ch.id})">
+        <input type="checkbox" ${sel?'checked':''} onclick="event.stopPropagation();toggleSel(${ch.id})">
+        <div class="toc-ch-main">
+          <div class="toc-ch-top">
+            <span class="toc-ch-si">${si}</span>
+            <span class="toc-ch-num">CH.${ch.num}</span>
+            <span class="toc-ch-title" title="${esc(ch.title)}">${esc(ch.title)}</span>
+          </div>
+          <div class="toc-ch-meta">
+            <span class="toc-ch-type ${esc(ch.type)}">${esc(ch.type)}</span>
+            <span class="toc-ch-chars">${writtenK} / ${targetK}자${pctCh>0?` (${pctCh}%)`:''}</span>
+          </div>
+          ${pctCh>0?`<div class="toc-ch-bar"><div class="toc-ch-bar-fill" style="width:${pctCh}%"></div></div>`:''}
+        </div>
+        <button class="toc-ch-btn" onclick="event.stopPropagation();writeChapter(${ch.id})">${ch.status==='done'?'🔄':'▶'}</button>
       </div>`;
-    });
-    html += `</div></div>`;
+    }
   }
-  // indeterminate 속성 적용 (HTML attribute로 안 됨)
-  setTimeout(() => {
-    document.querySelectorAll('[data-ind="true"]').forEach(el => { el.indeterminate = true; });
-  }, 0);
+
   body.innerHTML = html;
 
-  // 통계 업데이트
-  const done    = state.chapters.filter(c => c.status === 'done').length;
-  const writing = state.chapters.filter(c => c.status === 'writing').length;
-  const pending = state.chapters.filter(c => c.status === 'pending' || !c.status).length;
-  document.getElementById('tsDone').textContent    = done;
-  document.getElementById('tsWriting').textContent = writing;
-  document.getElementById('tsPending').textContent = pending;
-  document.getElementById('tsTotal').textContent   = state.chapters.length;
-  document.getElementById('tocStats').style.display = state.chapters.length ? 'flex' : 'none';
+  // indeterminate 적용
+  setTimeout(() => {
+    body.querySelectorAll('[data-ind="true"]').forEach(el => { el.indeterminate = true; });
+  }, 0);
 }
 
 function handleTocClick(e, id) {
-  if (e.target.type === 'checkbox' || e.target.classList.contains('toc-item-write-btn')) return;
+  if (e.target.type === 'checkbox' || e.target.classList.contains('toc-ch-btn')) return;
   selectChapter(id);
+}
+
+function clearTocHistory() {
+  fetch('/api/gemini/clear-toc', { method:'POST' });
+  const msgs = document.getElementById('tocChatMsgs');
+  if (msgs) msgs.innerHTML = '<div class="toc-ai-msg ai">대화가 초기화됐습니다</div>';
 }
 
 function selectChapter(id) {
   state.currentChapterId = id;
   renderTOC();
+}
+
+// ════════════════════════════════════════════════════
+// P2 탭 전환 (전체목차 / 스토리텔링 / 기획서)
+// ════════════════════════════════════════════════════
+function switchP2Tab(tab) {
+  ['toc','story','plan'].forEach(t => {
+    const btn  = document.getElementById(`p2tab-${t}`);
+    const pane = document.getElementById(`p2pane-${t}`);
+    if (btn)  btn.classList.toggle('active', t === tab);
+    if (pane) pane.style.display = t === tab ? 'flex' : 'none';
+  });
+}
+
+// ── 전체 스토리텔링 렌더링 ───────────────────────────
+function renderStory() {
+  const body = document.getElementById('storyBody');
+  if (!body || !state.chapters.length) return;
+
+  const pNames = { 0:'프롤로그', 1:'PART 1', 2:'PART 2', 3:'PART 3', 4:'PART 4', 5:'에필로그' };
+  const siMap  = { done:'✅', writing:'✍️', error:'❌', pending:'○' };
+  const parts  = {};
+  state.chapters.forEach(ch => { const k = ch.partNum??0; if(!parts[k]) parts[k]=[]; parts[k].push(ch); });
+
+  let html = '';
+  for (const [pn, chs] of Object.entries(parts).sort((a,b)=>+a[0]-+b[0])) {
+    const totalK = (chs.reduce((s,c)=>s+(c.targetChars||0),0)/10000).toFixed(1);
+    const done   = chs.filter(c=>c.status==='done').length;
+    html += `<div class="story-part">
+      <div class="story-part-title">
+        <span>${pNames[+pn]||`PART ${pn}`}</span>
+        <span style="color:var(--dim)">${done}/${chs.length} 완료 · ${totalK}만자</span>
+      </div>`;
+    chs.forEach(ch => {
+      const pct = ch.targetChars ? Math.min(100,Math.round((ch.writtenChars||0)/ch.targetChars*100)) : 0;
+      html += `<div class="story-ch ${ch.status||'pending'}">
+        <div class="story-ch-header">
+          <span class="story-ch-si">${siMap[ch.status||'pending']}</span>
+          <span class="story-ch-num">CH.${ch.num}</span>
+          <span class="story-ch-title">${esc(ch.title)}</span>
+          <span class="story-ch-type">${esc(ch.type)}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:9px;color:var(--dim);margin-bottom:4px">
+          <span>목표 ${(ch.targetChars/1000).toFixed(0)}k자</span>
+          <span>${ch.writtenChars?(ch.writtenChars/1000).toFixed(1)+'k작성':'미집필'}${pct>0?` · ${pct}%`:''}</span>
+        </div>
+        ${pct>0?`<div style="height:3px;background:var(--bg4);border-radius:2px;margin-bottom:5px;overflow:hidden"><div style="height:100%;width:${pct}%;background:var(--green);border-radius:2px"></div></div>`:''}
+        ${ch.summary?`<div class="story-ch-summary">📌 ${esc(ch.summary)}</div>`:''}
+        ${ch.chapterSummary?`<div class="story-ch-done-summary">✅ ${esc(ch.chapterSummary.substring(0,150))}${ch.chapterSummary.length>150?'...':''}</div>`:''}
+      </div>`;
+    });
+    html += '</div>';
+  }
+  body.innerHTML = html;
+}
+
+async function generateStorySummary() {
+  if (!state.chapters.length) { showToast('목차를 먼저 생성하세요', 'warn'); return; }
+  renderStory();
+  switchP2Tab('story');
+  showToast('스토리 뷰 업데이트됨', 'success');
+}
+
+// ── 기획서 표시 ─────────────────────────────────────
+function showPlanningDoc(text, title = '기획서') {
+  const body  = document.getElementById('planBody');
+  const label = document.getElementById('planDocTitle');
+  const chars = document.getElementById('planDocChars');
+  if (!body) return;
+  state.planningText = text;
+  body.textContent   = text;
+  if (label) label.textContent = title;
+  if (chars) chars.textContent = `${text.length.toLocaleString()}자`;
 }
 
 // ── 다중 선택 ────────────────────────────────────────
@@ -646,29 +781,42 @@ async function writeSelected() {
   showToast(`${ids.length}개 챕터 순서대로 집필 시작`, 'success');
   clearSel();
 
-  for (const id of ids) {
+  for (let i = 0; i < ids.length; i++) {
+    const id = ids[i];
     const ch = state.chapters.find(c => c.id === id);
     if (!ch) continue;
-    addLog(`▶ 집필 시작: ${ch.title}`, 'info');
-    if (engine === 'genspark') {
-      await post('/api/genspark/send', { chapterId: id });
-      // 응답 대기 (소켓 chapter:done 이벤트로 처리)
-      await new Promise(r => {
-        const h = () => { socket.off('chapter:done', h); r(); };
-        socket.on('chapter:done', h);
-        setTimeout(r, 360000); // 최대 6분 대기
-      });
-    } else {
-      await post(`/api/chapters/${id}/write`);
-      await new Promise(r => {
-        const h = () => { socket.off('chapter:done', h); r(); };
-        socket.on('chapter:done', h);
-        setTimeout(r, 360000);
-      });
-    }
-    await new Promise(r => setTimeout(r, 2000)); // 챕터 간 대기
+
+    addLog(`▶ [${i+1}/${ids.length}] ${ch.title} 집필 시작`, 'info');
+    // writeChapter 내부 로직 재사용 (스트림 탭 전환 포함)
+    await writeChapter(id);
+    // writeChapter가 이미 전송까지 처리하므로 별도 전송 불필요
+
+    // 해당 챕터 완료 대기 (ID 일치 확인)
+    await new Promise(resolve => {
+      const onDone = (data) => {
+        if (data.id === id) {
+          socket.off('chapter:done', onDone);
+          socket.off('claude:done', onDone);
+          resolve();
+        }
+      };
+      const onClaudeDone = () => {
+        socket.off('chapter:done', onDone);
+        socket.off('claude:done', onClaudeDone);
+        resolve();
+      };
+      socket.on('chapter:done', onDone);
+      socket.on('claude:done', onClaudeDone);
+      setTimeout(() => {
+        socket.off('chapter:done', onDone);
+        socket.off('claude:done', onClaudeDone);
+        resolve();
+      }, 360000);
+    });
+
+    await new Promise(r => setTimeout(r, 1500));
   }
-  showToast('선택 챕터 집필 완료!', 'success');
+  showToast(`✅ 선택 ${ids.length}개 챕터 집필 완료!`, 'success');
 }
 
 async function deleteSelected() {
@@ -752,6 +900,70 @@ async function gsConnect() {
   showLoading('Genspark 브라우저 시작 중...');
   const r = await post('/api/genspark/connect', { url });
   if (!r.success) { hideLoading(); showToast(r.message, 'error'); }
+}
+
+// ── Genspark로 목차 생성 ────────────────────────────
+async function gsGenerateToc() {
+  if (!state.gensparkConnected) { showToast('Genspark를 먼저 연결하세요', 'warn'); openGsModal(); return; }
+  if (!uploadedFile?.text && !document.getElementById('planningUrl')?.value) {
+    showToast('기획서 파일이나 URL을 먼저 입력하세요', 'warn'); return;
+  }
+
+  const text   = uploadedFile?.text || '';
+  const title  = uploadedFile?.filename?.replace(/\.[^/.]+$/, '') || state.bookTitle || '';
+  const target = parseInt(document.getElementById('totalTarget')?.value) || 4000000;
+
+  if (!text && document.getElementById('planningUrl')?.value) {
+    showToast('URL 기획서는 먼저 "URL 기획서 분석" 버튼을 사용하세요', 'warn'); return;
+  }
+
+  showLoading('🤖 Genspark(Claude Opus 4.6)로 목차 생성 중...\n완료까지 2~5분 소요');
+  isAnalyzing = true;
+  setAnalyzeBtn(true);
+
+  try {
+    const r = await post('/api/genspark/generate-toc', { text, bookTitle: title, totalTarget: target });
+    hideLoading();
+    if (r.success) {
+      showToast(`🤖 Genspark 목차 ${r.chapters.length}개 생성 완료`, 'success');
+      switchP2Tab('toc');
+    } else {
+      showToast(`실패: ${r.message}`, 'error');
+      addLog(`Genspark 목차 실패: ${r.message}`, 'error');
+    }
+  } finally {
+    isAnalyzing = false;
+    setAnalyzeBtn(false);
+  }
+}
+
+// ── Genspark로 스토리텔링 생성 ──────────────────────
+async function gsGenerateStory() {
+  if (!state.gensparkConnected) { showToast('Genspark를 먼저 연결하세요', 'warn'); openGsModal(); return; }
+  if (!state.chapters.length) { showToast('목차를 먼저 생성하세요', 'warn'); switchP2Tab('toc'); return; }
+
+  showLoading('🤖 Genspark로 스토리텔링 생성 중...\n완료까지 2~3분 소요');
+  const r = await post('/api/genspark/generate-story');
+  hideLoading();
+  if (r.success) switchP2Tab('story');
+  else showToast(`실패: ${r.message}`, 'error');
+}
+
+// ── Genspark로 기획서 분석 ──────────────────────────
+async function gsAnalyzePlan() {
+  if (!state.gensparkConnected) { showToast('Genspark를 먼저 연결하세요', 'warn'); openGsModal(); return; }
+  const text = state.planningText || uploadedFile?.text;
+  if (!text) { showToast('기획서 텍스트가 없습니다', 'warn'); return; }
+
+  showLoading('🤖 Genspark로 기획서 분석 중...');
+  const r = await post('/api/genspark/analyze-plan', { text });
+  hideLoading();
+  if (r.success) {
+    showPlanningDoc(r.text + '\n\n---\n\n[원문]\n' + (state.planningText || ''), '기획서 (Genspark 분석)');
+    showToast('기획서 분석 완료', 'success');
+  } else {
+    showToast(`실패: ${r.message}`, 'error');
+  }
 }
 
 async function gsDiagnose() {
@@ -878,50 +1090,59 @@ function switchWriteTab(tab) {
 
 async function writeChapter(id) {
   selectChapter(id);
-
-  // 집필 스트림 탭으로 전환 + 챕터 패널 초기화
   switchTab('write');
   showWritingPane(id);
   writingContent = '';
 
+  // 스트림 탭 초기화
+  const ws = document.getElementById('writingStream');
+  if (ws) ws.textContent = '';
+  document.getElementById('wcChars').textContent   = '0자';
+  document.getElementById('wcProgBar').style.width = '0%';
+  document.getElementById('stopBtn').style.display = 'none';
+  document.getElementById('saveContentBtn').style.display = 'none';
+
   if (writeEngine === 'genspark') {
-    // ── Genspark: 프롬프트 생성 → 복사 → 붙여넣기 대기
-    showLoading('프롬프트 생성 중...');
-    const pr = await fetch('/api/writing-prompt', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chapterId: id }),
-    }).then(r => r.json());
-    hideLoading();
-
-    const prompt = pr.prompt || '';
-    document.getElementById('writingPromptText').textContent = prompt;
-
-    // 프롬프트 탭 → 붙여넣기 탭 순서로 보여주기
-    switchWriteTab('prompt');
-
-    // 자동 클립보드 복사
-    try {
-      await navigator.clipboard.writeText(prompt);
-      showToast('✅ 프롬프트가 클립보드에 복사됐습니다!\nGenspark에 붙여넣고 집필 후 [📥 결과 붙여넣기] 탭에 저장하세요', 'success');
-      addLog(`📋 프롬프트 복사 완료 (${prompt.length.toLocaleString()}자) — Genspark에 붙여넣으세요`, 'success');
-    } catch (_) {
-      showToast('프롬프트가 준비됐습니다. 📋 복사 버튼을 클릭하세요', 'info');
+    if (!state.gensparkConnected) {
+      // Genspark 미연결 → 프롬프트 복사 방식 (수동)
+      showLoading('프롬프트 생성 중...');
+      const pr = await fetch('/api/writing-prompt', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ chapterId: id }),
+      }).then(r => r.json());
+      hideLoading();
+      const prompt = pr.prompt || '';
+      document.getElementById('writingPromptText').textContent = prompt;
+      switchWriteTab('prompt');
+      try {
+        await navigator.clipboard.writeText(prompt);
+        showToast('📋 프롬프트 복사됨 — Genspark에 붙여넣고 집필 후 [📥 결과 붙여넣기]에 저장하세요', 'success');
+      } catch (_) { showToast('📋 복사 버튼을 클릭하세요', 'info'); }
+      const pa = document.getElementById('pasteContentArea');
+      if (pa) { pa.value = ''; updatePasteCount(''); }
+      return;
     }
 
-    // 붙여넣기 탭 초기화
-    const pa = document.getElementById('pasteContentArea');
-    if (pa) { pa.value = ''; updatePasteCount(''); }
+    // Genspark 연결됨 → 자동 전송 + 스트림 탭 표시
+    switchWriteTab('stream');
+    if (ws) ws.innerHTML = `<div style="color:var(--muted);padding:20px;text-align:center;animation:pulse 1.5s infinite">
+      <div style="font-size:24px;margin-bottom:8px">🤖</div>
+      <div>Genspark(Claude Opus 4.6)가 집필 중입니다...</div>
+      <div style="font-size:10px;margin-top:6px;color:var(--dim)">완료되면 자동으로 내용이 표시됩니다</div>
+    </div>`;
+
+    const r = await post('/api/genspark/send', { chapterId: id });
+    if (!r.success) {
+      showToast(`전송 실패: ${r.message}`, 'error');
+      if (ws) ws.textContent = '';
+    } else {
+      addLog(`🤖 Genspark 집필 전송 완료 — 응답 대기 중`, 'info');
+    }
 
   } else {
-    // ── Claude API: 자동 스트리밍
+    // Claude API 자동 스트리밍
     if (!state.claudeReady) { showToast('Claude API 키를 먼저 설정하세요', 'warn'); return; }
     switchWriteTab('stream');
-    const ws = document.getElementById('writingStream');
-    if (ws) ws.textContent = '';
-    document.getElementById('wcChars').textContent   = '0자';
-    document.getElementById('wcProgBar').style.width = '0%';
-    document.getElementById('stopBtn').style.display = 'none';
     await post(`/api/chapters/${id}/write`);
   }
 }
@@ -1153,10 +1374,22 @@ function switchTab(tab) {
 // 통계 & UI 갱신
 // ════════════════════════════════════════════════════
 
+function syncTitle() {
+  const el = document.getElementById('bookTitle');
+  if (!el) return;
+  if (state.bookTitle && state.bookTitle !== '도서') {
+    el.textContent = state.bookTitle;
+    el.style.color = 'var(--text)';
+  } else {
+    el.textContent = '도서 제목을 입력하세요 (클릭)';
+    el.style.color = 'var(--dim)';
+  }
+}
+
 function renderAll() {
   renderTOC(); updateStats();
   updateStatusBadge(state.status);
-  if (state.bookTitle) document.getElementById('bookTitle').textContent = state.bookTitle;
+  syncTitle();
   if (state.geminiReady) setBadge('geminibadge', 'Gemini ✅', 'ok');
   if (state.claudeReady) setBadge('claudebadge', 'Claude ✅', 'ok');
   if (state.docUrl) setBadge('docbadge', '📄 문서 연결됨', 'ok');
@@ -1166,6 +1399,14 @@ function updateStats() {
   const written = state.totalWritten || state.chapters.reduce((s,c) => s + (c.writtenChars||0), 0);
   const target  = parseInt(document.getElementById('totalTarget')?.value) || 4000000;
   const pct     = Math.min(100, written / target * 100);
+
+  // P2 분량 진행바
+  const tocW = document.getElementById('tocWrittenChars');
+  const tocT = document.getElementById('tocTargetChars');
+  const tocB = document.getElementById('tocProgressBar');
+  if (tocW) tocW.textContent = fmt(written) + '자';
+  if (tocT) tocT.textContent = `/ ${fmt(target)}자`;
+  if (tocB) tocB.style.width = `${pct}%`;
   const done    = state.chapters.filter(c => c.status === 'done').length;
   const pending = state.chapters.filter(c => c.status === 'pending' || !c.status).length;
 
@@ -1244,60 +1485,50 @@ function hideLoading() { document.getElementById('loadingOverlay').style.display
 // 패널 리사이저 (드래그로 너비 조절)
 // ════════════════════════════════════════════════════
 (function initResizers() {
+  // fixedPanel: 너비를 직접 조정할 패널 (flex:1 패널은 건드리지 않음)
+  // p3는 flex:1이므로 절대 width를 고정하지 않음
   const CONFIGS = [
-    { id: 'r1', left: 'p1', right: 'p2' },
-    { id: 'r2', left: 'p2', right: 'p3' },
-    { id: 'r3', left: 'p3', right: 'p4' },
+    { id:'r1', fixed:'p1',  flex:'p2',  side:'left'  }, // r1: p1 크기 조정
+    { id:'r2', fixed:'p2',  flex:'p3',  side:'left'  }, // r2: p2 크기 조정
+    { id:'r3', fixed:'p4',  flex:'p3',  side:'right' }, // r3: p4 크기 조정 (p3는 건드리지 않음)
   ];
 
-  CONFIGS.forEach(({ id, left, right }) => {
-    const resizer  = document.getElementById(id);
-    const leftPanel  = document.getElementById(left);
-    const rightPanel = document.getElementById(right);
-    if (!resizer || !leftPanel || !rightPanel) return;
+  const defaults = { p1:'200px', p2:'260px', p4:'220px' };
 
-    // 저장된 너비 복원
-    const savedLeft  = localStorage.getItem(`pw_${left}`);
-    const savedRight = localStorage.getItem(`pw_${right}`);
-    if (savedLeft)  leftPanel.style.width  = savedLeft;
-    if (savedRight) rightPanel.style.width = savedRight;
+  CONFIGS.forEach(({ id, fixed, flex: flexPanel, side }) => {
+    const resizer    = document.getElementById(id);
+    const fixedEl    = document.getElementById(fixed);
+    const flexEl     = document.getElementById(flexPanel);
+    if (!resizer || !fixedEl) return;
+
+    // 저장된 너비 복원 (fixed 패널만)
+    const saved = localStorage.getItem(`pw_${fixed}`);
+    if (saved) { fixedEl.style.width = saved; fixedEl.style.flex = `0 0 ${saved}`; }
 
     resizer.addEventListener('mousedown', (e) => {
       e.preventDefault();
       resizer.classList.add('dragging');
 
-      const startX     = e.clientX;
-      const startLeft  = leftPanel.getBoundingClientRect().width;
-      const startRight = rightPanel.getBoundingClientRect().width;
-      const isFlexRight = right === 'p3'; // p3는 flex:1이므로 너비 고정
+      const startX   = e.clientX;
+      const startW   = fixedEl.getBoundingClientRect().width;
+      const minW     = parseInt(fixedEl.style.minWidth)  || 140;
+      const maxW     = parseInt(fixedEl.style.maxWidth)  || 600;
 
-      const onMove = (e) => {
-        const dx       = e.clientX - startX;
-        const newLeft  = Math.max(
-          parseInt(leftPanel.style.minWidth) || 140,
-          Math.min(parseInt(leftPanel.style.maxWidth) || 600, startLeft + dx)
-        );
-
-        leftPanel.style.width = newLeft + 'px';
-        leftPanel.style.flex  = '0 0 ' + newLeft + 'px';
-
-        if (!isFlexRight) {
-          const newRight = Math.max(
-            parseInt(rightPanel.style.minWidth) || 150,
-            Math.min(parseInt(rightPanel.style.maxWidth) || 600, startRight - dx)
-          );
-          rightPanel.style.width = newRight + 'px';
-          rightPanel.style.flex  = '0 0 ' + newRight + 'px';
-        }
+      const onMove = (mv) => {
+        const dx   = mv.clientX - startX;
+        // side=left: 드래그 오른쪽 → 커짐 / side=right: 드래그 왼쪽 → 커짐
+        const newW = Math.max(minW, Math.min(maxW,
+          side === 'left' ? startW + dx : startW - dx
+        ));
+        fixedEl.style.width = `${newW}px`;
+        fixedEl.style.flex  = `0 0 ${newW}px`;
       };
 
       const onUp = () => {
         resizer.classList.remove('dragging');
         document.removeEventListener('mousemove', onMove);
         document.removeEventListener('mouseup',   onUp);
-        // 너비 저장
-        localStorage.setItem(`pw_${left}`,  leftPanel.style.width);
-        if (!isFlexRight) localStorage.setItem(`pw_${right}`, rightPanel.style.width);
+        localStorage.setItem(`pw_${fixed}`, fixedEl.style.width);
       };
 
       document.addEventListener('mousemove', onMove);
@@ -1305,10 +1536,13 @@ function hideLoading() { document.getElementById('loadingOverlay').style.display
     });
 
     // 더블클릭 → 기본값 복원
-    const defaults = { p1:'200px', p2:'240px', p4:'200px' };
     resizer.addEventListener('dblclick', () => {
-      if (defaults[left])  { leftPanel.style.width = defaults[left];  leftPanel.style.flex  = '0 0 ' + defaults[left];  localStorage.removeItem(`pw_${left}`); }
-      if (defaults[right]) { rightPanel.style.width = defaults[right]; rightPanel.style.flex = '0 0 ' + defaults[right]; localStorage.removeItem(`pw_${right}`); }
+      const def = defaults[fixed];
+      if (def) {
+        fixedEl.style.width = def;
+        fixedEl.style.flex  = `0 0 ${def}`;
+        localStorage.removeItem(`pw_${fixed}`);
+      }
     });
   });
 })();
