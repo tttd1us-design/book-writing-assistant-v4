@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>📚 도서집필도우미 v4</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<!-- 상단 헤더 -->
+<header class="topbar">
+  <span class="logo">📚 v4</span>
+  <div class="book-title-wrap">
+    <span class="book-title" id="bookTitle" onclick="startEditTitle()" title="클릭하여 제목 수정">도서 제목을 입력하세요</span>
+    <button class="ibtn" onclick="startEditTitle()" style="font-size:10px">✏️</button>
+    <span id="titleEditor" style="display:none;gap:4px;align-items:center">
+      <input id="titleInput" class="finput" style="width:220px;padding:3px 7px" placeholder="도서 제목...">
+      <button class="btn btn-sm btn-primary" onclick="confirmTitle()">저장</button>
+      <button class="btn btn-sm btn-outline" onclick="cancelTitle()">✕</button>
+    </span>
+  </div>
+  <div class="prog-bar-wrap"><div class="prog-bar" id="mainProg" style="width:0%"></div></div>
+  <div class="prog-text" id="progText">0 / 4,000,000자</div>
+  <div class="topbar-right">
+    <span class="badge" id="geminibadge">Gemini 미연결</span>
+    <span class="badge" id="claudebadge">Claude 미연결</span>
+    <button class="btn btn-sm" id="gsHeaderBtn" onclick="openGsModal()"
+      style="background:rgba(76,175,122,0.15);border:1px solid rgba(76,175,122,0.4);color:var(--green);font-size:10px;padding:3px 10px">
+      🤖 Genspark 연결
+    </button>
+    <span class="badge" id="statusbadge">● 대기중</span>
+    <span class="badge" id="docbadge">📄 문서 미설정</span>
+  </div>
+</header>
+
+<!-- 4패널 -->
+<div class="panels">
+
+  <!-- ▌P1: 설정 ▌ -->
+  <div class="panel" id="p1" style="width:200px;min-width:140px;max-width:400px">
+    <div class="panel-header">⚙️ 설정</div>
+    <div class="panel-body">
+
+      <div class="section-title">🔑 API 연결</div>
+
+      <div class="fg">
+        <div class="flabel">✦ Gemini API 키</div>
+        <input id="geminiKey" class="finput" type="password" placeholder="AIza..."
+               onchange="loadGeminiModels(this.value)">
+        <select id="geminiModel" class="finput" style="margin-top:3px">
+          <option value="gemini-2.0-flash-lite">gemini-2.0-flash-lite (권장 · 무료)</option>
+          <option value="gemini-2.0-flash">gemini-2.0-flash</option>
+          <option value="gemini-2.0-pro-exp">gemini-2.0-pro-exp</option>
+          <option value="gemini-1.5-flash">gemini-1.5-flash</option>
+          <option value="gemini-1.5-pro">gemini-1.5-pro</option>
+        </select>
+        <button class="btn btn-gemini btn-full" onclick="initGemini()" style="margin-top:3px">Gemini 연결</button>
+        <button class="btn btn-outline btn-full" onclick="loadGeminiModels()" style="margin-top:2px;font-size:10px">↻ 사용 가능 모델 조회</button>
+      </div>
+
+      <div class="fg">
+        <div class="flabel">🤖 Claude API 키</div>
+        <input id="claudeKey" class="finput" type="password" placeholder="sk-ant-...">
+        <div style="display:flex;gap:3px;margin-top:3px">
+          <select id="claudeModel" class="finput" style="flex:1">
+            <option value="claude-opus-4-5">Opus 4.5 (고품질)</option>
+            <option value="claude-sonnet-4-5">Sonnet 4.5 (빠름)</option>
+            <option value="claude-haiku-4-5-20251001">Haiku 4.5 (경제)</option>
+          </select>
+          <button class="btn btn-claude" onclick="initClaude()" style="flex-shrink:0">연결</button>
+        </div>
+      </div>
+
+      <div class="divider"></div>
+      <div class="section-title">📄 기획서 입력</div>
+
+      <div class="fg">
+        <div class="flabel">Google Docs URL</div>
+        <div style="display:flex;gap:3px">
+          <input id="planningUrl" class="finput" type="text" placeholder="docs.google.com/..." style="flex:1">
+          <button class="ibtn" onclick="openDrivePicker('planning')" title="Drive에서 선택">📂</button>
+        </div>
+      </div>
+
+      <div class="fg">
+        <div class="flabel">목표 글자수</div>
+        <input id="totalTarget" class="finput" type="number" value="4000000" step="100000" min="100000">
+      </div>
+
+      <button class="btn btn-gemini btn-full" id="analyzeBtn" onclick="analyzeFromUrl()">✦ URL 기획서 분석</button>
+
+      <div class="divider"></div>
+      <div class="flabel">📎 파일 첨부</div>
+      <div class="dropzone" id="dropZone"
+           ondragover="onDragOver(event)" ondragleave="onDragLeave(event)" ondrop="onDrop(event)"
+           onclick="document.getElementById('fileInput').click()">
+        <div>📄 드래그 또는 클릭</div>
+        <div style="font-size:10px;color:var(--dim);margin-top:3px">PDF · DOCX · TXT · MD</div>
+        <input id="fileInput" type="file" accept=".pdf,.docx,.doc,.txt,.md" style="display:none" onchange="onFileSelect(event)">
+      </div>
+      <div id="fileList" class="file-list"></div>
+
+      <button class="btn btn-gemini btn-full" id="analyzeFileBtn" onclick="analyzeFromFile()" style="display:none">✦ 파일 기획서 분석</button>
+
+      <div class="divider"></div>
+      <div class="section-title">🤖 집필 AI 선택</div>
+      <div style="display:flex;flex-direction:column;gap:3px">
+        <label style="display:flex;align-items:center;gap:5px;font-size:11px;cursor:pointer">
+          <input type="radio" name="writeEngine" value="genspark" id="engineGenspark" checked onchange="setEngine(this.value)">
+          Genspark (P3 탭에서 연결)
+        </label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:11px;cursor:pointer">
+          <input type="radio" name="writeEngine" value="claude" id="engineClaude" onchange="setEngine(this.value)">
+          Claude API (직접 호출)
+        </label>
+      </div>
+      <div class="badge" id="engineStatus" style="margin-top:2px">Genspark 선택됨</div>
+
+      <div class="divider"></div>
+      <div class="section-title">💾 Google Docs 저장</div>
+
+      <div class="fg">
+        <div class="flabel">저장할 파일 지정</div>
+        <div style="display:flex;gap:3px">
+          <input id="targetDocUrl" class="finput" type="text" placeholder="URL 또는 ID..." style="flex:1">
+          <button class="ibtn" onclick="openDrivePicker('target')" title="Drive에서 선택">📂</button>
+        </div>
+        <div style="display:flex;gap:3px;margin-top:3px">
+          <button class="btn btn-sm btn-success btn-full" onclick="setTargetDoc()">지정</button>
+          <button class="btn btn-sm btn-outline" onclick="createNewDoc()" title="새 문서 생성">＋ 새 문서</button>
+        </div>
+        <div class="badge" id="docTargetStatus" style="margin-top:3px;display:block">미지정</div>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="resizer" id="r1"></div>
+
+  <!-- ▌P2: 목차 ▌ -->
+  <div class="panel" id="p2" style="width:240px;min-width:160px;max-width:420px">
+    <div class="panel-header">
+      📑 목차
+      <div style="display:flex;gap:3px;align-items:center">
+        <span id="chapCount" style="font-size:10px;color:var(--muted)">0챕터</span>
+        <button class="ibtn" onclick="reviewTOC()" title="AI 검토">🔍</button>
+        <button class="ibtn" onclick="confirmResetOutline()" title="목차 전체 초기화" style="color:var(--red)" title="목차 초기화">🔄 초기화</button>
+      </div>
+    </div>
+    <div class="panel-body" style="padding:8px;gap:6px">
+
+      <!-- 통계 -->
+      <div class="toc-stats" id="tocStats" style="display:none">
+        <div class="toc-stat"><div class="sv" id="tsDone">0</div><div class="sl">완료</div></div>
+        <div class="toc-stat"><div class="sv" id="tsWriting">0</div><div class="sl">집필중</div></div>
+        <div class="toc-stat"><div class="sv" id="tsPending">0</div><div class="sl">대기</div></div>
+        <div class="toc-stat"><div class="sv" id="tsTotal">0</div><div class="sl">전체</div></div>
+      </div>
+
+      <!-- 전체선택 + 검색 -->
+      <div style="display:flex;gap:4px;align-items:center">
+        <label style="display:flex;align-items:center;gap:4px;cursor:pointer;font-size:10px;color:var(--muted);flex-shrink:0">
+          <input type="checkbox" id="selAll" onchange="toggleSelAll(this.checked)"
+                 style="accent-color:var(--gold);width:12px;height:12px">
+          전체
+        </label>
+        <input id="tocSearch" class="finput" placeholder="🔍 검색..." oninput="renderTOC()" style="flex:1">
+        <select id="tocFilter" class="finput" style="width:52px" onchange="renderTOC()">
+          <option value="">전체</option>
+          <option value="르포">르포</option>
+          <option value="에세이">에세이</option>
+          <option value="대화">대화</option>
+        </select>
+      </div>
+
+      <!-- 선택 액션 바 -->
+      <div id="selBar" style="display:none;flex-direction:column;gap:4px;background:rgba(201,169,78,0.08);border:1px solid rgba(201,169,78,0.25);border-radius:7px;padding:7px 8px">
+        <div style="display:flex;align-items:center;justify-content:space-between">
+          <span style="font-size:10px;color:var(--gold);font-weight:700"><span id="selCount">0</span>개 챕터 선택됨</span>
+          <button class="ibtn" onclick="clearSel()" style="font-size:10px">✕ 해제</button>
+        </div>
+        <div style="display:flex;gap:4px;flex-wrap:wrap">
+          <button class="btn btn-sm btn-primary" onclick="writeSelected()" style="flex:1">▶ 선택 집필 시작</button>
+          <button class="btn btn-sm btn-danger" onclick="deleteSelected()">🗑</button>
+        </div>
+        <div style="display:flex;gap:3px">
+          <button class="btn btn-sm btn-outline" onclick="selectPending()" style="flex:1;font-size:9px">미완료만</button>
+          <button class="btn btn-sm btn-outline" onclick="invertSel()" style="flex:1;font-size:9px">반전</button>
+        </div>
+      </div>
+
+      <!-- Gemini 목차 대화 -->
+      <div class="toc-chat">
+        <div style="font-size:10px;font-weight:700;color:var(--gold);margin-bottom:5px">✦ AI 목차 수정</div>
+        <div class="toc-chat-msgs" id="tocChatMsgs">
+          <div class="tc-msg model">목차 생성 후 수정을 요청하세요<br><span style="color:var(--dim)">"PART 2에 에세이 2개 추가해줘"</span></div>
+        </div>
+        <div class="toc-chat-input-row">
+          <input class="toc-chat-input" id="tocChatInput" placeholder="수정 요청..." onkeydown="if(event.key==='Enter')sendTocChat()">
+          <button class="ibtn" onclick="sendTocChat()">↑</button>
+        </div>
+      </div>
+
+      <!-- 목차 본문 -->
+      <div class="toc-body" id="tocBody">
+        <div class="toc-empty">
+          <div style="font-size:28px">📖</div>
+          <div>기획서를 분석하면<br>목차가 표시됩니다</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="resizer" id="r2"></div>
+
+  <!-- ▌P3: 집필 / Gemini 채팅 ▌ -->
+  <div class="panel" id="p3" style="flex:1;min-width:280px">
+    <div class="p3-tabs">
+      <button class="p3-tab active" id="tab-write" onclick="switchTab('write')">✍️ 집필 스트림</button>
+      <button class="p3-tab" id="tab-genspark" onclick="switchTab('genspark')">🤖 Genspark</button>
+      <button class="p3-tab" id="tab-chat" onclick="switchTab('chat')">✦ Gemini 채팅</button>
+    </div>
+
+    <!-- 집필 탭 -->
+    <div class="p3-content" id="pane-write" style="flex-direction:column">
+
+      <!-- 챕터 정보 바 -->
+      <div id="writingChapterInfo" class="writing-chapter-info" style="display:none;flex-shrink:0">
+        <div class="wci-title" id="wciTitle"></div>
+        <div class="wci-meta">
+          <span>타입: <b id="wciType"></b></span>
+          <span>목표: <b id="wciTarget"></b></span>
+          <span>파트: <b id="wciPart"></b></span>
+        </div>
+      </div>
+
+      <!-- 집필 엔진 탭 -->
+      <div id="writingEngineBar" style="display:none;flex-shrink:0;border-bottom:1px solid var(--border)">
+        <div style="display:flex;gap:0">
+          <button class="p3-tab active" id="wetab-prompt" onclick="switchWriteTab('prompt')" style="flex:1;font-size:10px;padding:6px">📋 프롬프트</button>
+          <button class="p3-tab" id="wetab-stream" onclick="switchWriteTab('stream')" style="flex:1;font-size:10px;padding:6px">✍️ 집필 내용</button>
+          <button class="p3-tab" id="wetab-paste" onclick="switchWriteTab('paste')" style="flex:1;font-size:10px;padding:6px">📥 결과 붙여넣기</button>
+        </div>
+      </div>
+
+      <!-- 플레이스홀더 -->
+      <div class="writing-placeholder" id="writingPlaceholder">
+        <div style="font-size:40px;margin-bottom:8px">✍️</div>
+        <div style="font-weight:700;margin-bottom:6px">목차에서 챕터 ▶ 버튼을 클릭하세요</div>
+        <div style="color:var(--dim);font-size:11px;line-height:1.8">
+          Genspark 사용 시:<br>
+          1️⃣ 챕터 ▶ → 프롬프트 자동 생성<br>
+          2️⃣ 📋 복사 → Genspark에 붙여넣기<br>
+          3️⃣ Genspark 응답 복사 → 📥 붙여넣기 탭에 저장<br>
+          4️⃣ 💾 저장 → Google Docs 자동 저장
+        </div>
+      </div>
+
+      <!-- 프롬프트 패널 -->
+      <div id="wpane-prompt" style="display:none;flex:1;flex-direction:column;overflow:hidden">
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 12px;background:var(--bg2);border-bottom:1px solid var(--border);flex-shrink:0">
+          <span style="font-size:10px;font-weight:700;color:var(--muted)">생성된 집필 프롬프트</span>
+          <div style="display:flex;gap:5px">
+            <button class="btn btn-primary btn-sm" onclick="copyPromptToClipboard()" id="copyPromptBtn">📋 복사 (Genspark에 붙여넣기)</button>
+            <button class="btn btn-sm btn-outline" onclick="regenerateWritingPrompt()">🔄 재생성</button>
+          </div>
+        </div>
+        <div id="writingPromptText" style="flex:1;overflow-y:auto;padding:12px;font-size:11px;line-height:1.7;color:var(--text);white-space:pre-wrap;background:var(--bg3)"></div>
+      </div>
+
+      <!-- 집필 스트림 패널 (Claude 자동 집필) -->
+      <div id="wpane-stream" style="display:none;flex:1;flex-direction:column;overflow:hidden">
+        <div style="display:flex;align-items:center;gap:8px;padding:6px 12px;background:var(--bg2);border-bottom:1px solid var(--border);flex-shrink:0">
+          <span style="font-size:10px;font-weight:700;color:var(--muted)">실시간 집필 스트림</span>
+          <span id="wcChars" style="font-size:11px;color:var(--gold);font-weight:700">0자</span>
+          <div style="flex:1;height:4px;background:var(--bg3);border-radius:2px;overflow:hidden">
+            <div id="wcProgBar" style="height:100%;background:var(--green);border-radius:2px;width:0%;transition:width 0.3s"></div>
+          </div>
+          <button class="btn btn-sm btn-outline" onclick="copyContent()">📋</button>
+          <button class="btn btn-sm btn-danger" onclick="stopWriting()" id="stopBtn" style="display:none">⏹</button>
+        </div>
+        <div class="writing-stream" id="writingStream" style="flex:1;overflow-y:auto;padding:12px"></div>
+      </div>
+
+      <!-- 결과 붙여넣기 패널 -->
+      <div id="wpane-paste" style="display:none;flex:1;flex-direction:column;overflow:hidden">
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 12px;background:var(--bg2);border-bottom:1px solid var(--border);flex-shrink:0">
+          <span style="font-size:10px;font-weight:700;color:var(--muted)">Genspark 응답 붙여넣기 → Google Docs 저장</span>
+          <div style="display:flex;gap:5px">
+            <span id="pasteCharCount" style="font-size:10px;color:var(--gold)">0자</span>
+            <button class="btn btn-success btn-sm" onclick="savePastedContent()" id="savePasteBtn">💾 Google Docs 저장</button>
+          </div>
+        </div>
+        <textarea id="pasteContentArea"
+          style="flex:1;background:var(--bg3);border:none;color:var(--text);font-size:12px;padding:12px;resize:none;font-family:var(--font);line-height:1.8;outline:none"
+          placeholder="Genspark에서 완성된 글을 복사해서 여기에 붙여넣으세요.&#10;&#10;Ctrl+V 또는 마우스 우클릭 → 붙여넣기&#10;&#10;붙여넣기 후 💾 Google Docs 저장 버튼을 클릭하세요."
+          oninput="updatePasteCount(this.value)"></textarea>
+      </div>
+
+      <!-- 하단 저장 버튼 (Claude 스트림용) -->
+      <div style="padding:6px 10px;border-top:1px solid var(--border);background:var(--bg2);flex-shrink:0;display:none" id="streamSaveBar">
+        <button class="btn btn-success btn-full" onclick="saveCurrentContent()" id="saveContentBtn">💾 Google Docs 저장</button>
+      </div>
+
+    </div>
+
+    <!-- Genspark 탭 -->
+    <div class="p3-content" id="pane-genspark" style="display:none;flex-direction:column">
+      <!-- 연결 바 -->
+      <div style="display:flex;gap:6px;align-items:center;padding:8px 10px;background:var(--bg2);border-bottom:1px solid var(--border);flex-shrink:0">
+        <input id="gsUrl" class="finput" placeholder="genspark.ai/agents/... URL" style="flex:1;font-size:10px">
+        <button class="btn btn-sm btn-primary" id="gsConnectBtn" onclick="gsConnect()">연결</button>
+        <button class="btn btn-sm btn-danger" onclick="gsDisconnect()" id="gsDisconnBtn" style="display:none">해제</button>
+        <span class="badge" id="gsBadge">⚫ 미연결</span>
+        <button class="ibtn" onclick="refreshGsScreen()" title="스크린샷 새로고침">📸</button>
+        <button class="ibtn" onclick="gsClear()" title="채팅 초기화">🗑</button>
+      </div>
+
+      <!-- 스크린샷 영역 -->
+      <div style="flex:1;overflow:hidden;position:relative;background:#000;min-height:0">
+        <div id="gsPlaceholder" style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;color:var(--dim);font-size:11px;gap:8px">
+          <div style="font-size:36px">🤖</div>
+          <div>Genspark URL 입력 후 연결하면<br>실시간 화면이 여기 표시됩니다</div>
+        </div>
+        <img id="gsScreenImg" style="display:none;width:100%;height:100%;object-fit:contain" alt="Genspark">
+      </div>
+
+      <!-- 실시간 텍스트 -->
+      <div style="height:160px;display:flex;flex-direction:column;border-top:1px solid var(--border);flex-shrink:0">
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:5px 10px;background:var(--bg2);border-bottom:1px solid var(--border)">
+          <span style="font-size:10px;font-weight:700;color:var(--muted)">💬 실시간 텍스트 <span id="gsTextLen" style="color:var(--gold)">0자</span></span>
+          <div style="display:flex;gap:5px">
+            <button class="btn btn-sm btn-success" onclick="gsManualSave()">💾 저장</button>
+            <button class="btn btn-sm btn-outline" onclick="gsCopyText()">📋 복사</button>
+          </div>
+        </div>
+        <div id="gsTextContent" style="flex:1;overflow-y:auto;padding:8px;font-size:11px;line-height:1.6;color:var(--text);white-space:pre-wrap">Genspark 응답이 여기 실시간으로 표시됩니다...</div>
+      </div>
+
+      <!-- 수동 저장 영역 -->
+      <div style="padding:8px;border-top:1px solid var(--border);background:var(--bg2);flex-shrink:0">
+        <div style="font-size:10px;color:var(--muted);margin-bottom:4px">✋ 수동 저장 (Genspark에서 복사한 내용 붙여넣기)</div>
+        <div style="display:flex;gap:5px">
+          <textarea id="gsManualText" style="flex:1;background:var(--bg3);border:1px solid var(--border);border-radius:5px;color:var(--text);font-size:11px;padding:5px;resize:none;font-family:var(--font)" rows="2" placeholder="Genspark 응답을 복사해서 붙여넣으세요..."></textarea>
+          <button class="btn btn-success" onclick="gsManualSaveText()" style="flex-shrink:0">💾</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Gemini 채팅 탭 -->
+    <div class="p3-content" id="pane-chat" style="display:none">
+      <div class="chat-area" id="chatArea">
+        <div class="chat-intro" id="chatIntro">
+          <div class="chat-intro-icon">✦</div>
+          <div style="font-weight:700;font-size:13px;color:var(--text);margin-bottom:4px">Gemini AI 채팅</div>
+          <div style="font-size:11px">도서 집필 작업을 자연어로 지시하세요</div>
+          <div class="chat-examples">
+            <div class="chat-example" onclick="sendChat(this.textContent)">"현재 목차를 요약해줘"</div>
+            <div class="chat-example" onclick="sendChat(this.textContent)">"1챕터 르포 집필 전략을 알려줘"</div>
+            <div class="chat-example" onclick="sendChat(this.textContent)">"PART 2 에세이들의 흐름을 점검해줘"</div>
+            <div class="chat-example" onclick="sendChat(this.textContent)">"등장인물 5명의 역할을 정리해줘"</div>
+          </div>
+        </div>
+        <div id="chatMsgs"></div>
+        <div id="chatThinking" class="chat-thinking" style="display:none">
+          <div class="dots"><span>.</span><span>.</span><span>.</span></div>
+          <span>Gemini 생각 중...</span>
+        </div>
+      </div>
+      <div class="chat-input-row">
+        <textarea class="chat-input" id="chatInput" rows="2"
+          placeholder="Gemini에게 질문하거나 작업을 지시하세요..."
+          onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendChat();}"></textarea>
+        <button class="chat-send" id="chatSend" onclick="sendChat()">↑</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="resizer" id="r3"></div>
+
+  <!-- ▌P4: 자동 집필 제어 ▌ -->
+  <div class="panel" id="p4" style="width:200px;min-width:150px;max-width:360px">
+    <div class="panel-header">🚀 집필 제어</div>
+    <div class="panel-body">
+
+      <!-- 원형 진행 -->
+      <div class="ring-wrap">
+        <svg viewBox="0 0 120 120">
+          <defs>
+            <linearGradient id="ringGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+              <stop offset="0%" stop-color="#8A7135"/>
+              <stop offset="100%" stop-color="#C9A94E"/>
+            </linearGradient>
+          </defs>
+          <circle class="ring-bg"   cx="60" cy="60" r="52"/>
+          <circle class="ring-fill" id="ringFill" cx="60" cy="60" r="52"
+            stroke-dasharray="326.7" stroke-dashoffset="326.7"/>
+        </svg>
+        <div class="ring-center">
+          <div class="ring-pct" id="ringPct">0%</div>
+          <div class="ring-label">완료</div>
+        </div>
+      </div>
+
+      <!-- 통계 -->
+      <div class="stats-grid">
+        <div class="stat-card"><div class="stat-val" id="svWritten">0</div><div class="stat-label">작성</div></div>
+        <div class="stat-card"><div class="stat-val" id="svTarget">4M</div><div class="stat-label">목표</div></div>
+        <div class="stat-card"><div class="stat-val" id="svDone">0</div><div class="stat-label">완료</div></div>
+        <div class="stat-card"><div class="stat-val" id="svRemain">-</div><div class="stat-label">남은챕터</div></div>
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="auto-status" id="autoStatus">⏸️ 대기중</div>
+      <div class="eta" id="etaLabel"></div>
+
+      <button class="btn btn-primary btn-full" id="autoStartBtn" onclick="autoStart()">▶ 전체 자동 집필</button>
+      <button class="btn btn-outline btn-full" id="autoPauseBtn" onclick="autoPause()" style="display:none;margin-top:4px">⏸ 일시정지</button>
+      <button class="btn btn-outline btn-full" id="autoResumeBtn" onclick="autoResume()" style="display:none;margin-top:4px">▶ 재개</button>
+      <button class="btn btn-danger  btn-full" id="autoStopBtn"  onclick="autoStop()"  style="display:none;margin-top:4px">⏹ 중지</button>
+
+      <div class="divider"></div>
+
+      <div class="flabel" style="display:flex;justify-content:space-between">
+        📋 로그 <button class="ibtn" onclick="clearLog()">지우기</button>
+      </div>
+      <div class="log-box" id="logBox"></div>
+
+    </div>
+  </div>
+
+</div><!-- .panels -->
+
+<!-- Drive 파일 피커 모달 -->
+<div id="drivePicker" class="drive-picker-modal" style="display:none">
+  <div class="drive-picker-box">
+    <div class="drive-picker-header">
+      <h3 id="drivePickerTitle">📂 Google Drive 파일 선택</h3>
+      <button class="ibtn" onclick="closeDrivePicker()">✕</button>
+    </div>
+    <div class="drive-search-bar">
+      <input id="driveSearch" class="finput" placeholder="파일 검색..." style="flex:1"
+             onkeydown="if(event.key==='Enter')searchDrive()">
+      <button class="btn btn-sm btn-gemini" onclick="searchDrive()">검색</button>
+      <button class="btn btn-sm btn-outline" onclick="loadRecentFiles()">최근 파일</button>
+    </div>
+    <div class="drive-file-list" id="driveFileList">
+      <div style="text-align:center;color:var(--dim);padding:20px;font-size:11px">
+        검색하거나 "최근 파일"을 클릭하세요
+      </div>
+    </div>
+    <div class="drive-picker-footer">
+      <button class="btn btn-outline" onclick="closeDrivePicker()">취소</button>
+      <button class="btn btn-primary" id="drivePickerConfirm" onclick="confirmDrivePick()" disabled>선택</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ Genspark 연결 창 ══ -->
+<div id="gsModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:9500;align-items:center;justify-content:center;backdrop-filter:blur(5px)">
+  <div style="background:var(--bg2);border:1px solid var(--border2);border-radius:14px;width:680px;max-height:90vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,0.6)">
+
+    <!-- 헤더 -->
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--border);flex-shrink:0">
+      <div style="display:flex;align-items:center;gap:10px">
+        <span style="font-size:20px">🤖</span>
+        <div>
+          <div style="font-size:13px;font-weight:700;color:var(--gold)">Genspark 연결</div>
+          <div style="font-size:10px;color:var(--muted)">AI 집필 브라우저 자동 제어</div>
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <span class="badge" id="gsModalBadge">⚫ 미연결</span>
+        <button class="ibtn" onclick="closeGsModal()" style="font-size:13px">✕</button>
+      </div>
+    </div>
+
+    <!-- URL 입력 & 연결 -->
+    <div style="padding:14px 18px;border-bottom:1px solid var(--border);flex-shrink:0;display:flex;flex-direction:column;gap:8px">
+      <div style="font-size:10px;color:var(--muted)">Genspark 에이전트 URL (genspark.ai/agents/...)</div>
+      <div style="display:flex;gap:6px">
+        <input id="gsModalUrl" class="finput" placeholder="https://www.genspark.ai/agents/..." style="flex:1">
+        <button class="btn btn-primary" id="gsModalConnectBtn" onclick="gsModalConnect()">🔗 연결</button>
+        <button class="btn btn-danger" id="gsModalDisconnBtn" onclick="gsDisconnect();updateGsModalBadge(false)" style="display:none">연결 해제</button>
+      </div>
+      <div style="font-size:10px;color:var(--dim)">💡 로그인이 필요하면 열린 브라우저 창에서 직접 로그인하세요 (90초 대기)</div>
+
+      <!-- Claude 모델 선택 -->
+      <div style="display:flex;align-items:center;gap:8px;padding:8px 0 0">
+        <div style="font-size:10px;font-weight:700;color:var(--muted);white-space:nowrap">🤖 Claude 모델</div>
+        <select id="gsClaudeModel" class="finput" style="flex:1;font-size:11px">
+          <optgroup label="── Claude 4 계열 ──">
+            <option value="claude-opus-4.6">Claude Opus 4.6 ★</option>
+            <option value="claude-opus-4.5">Claude Opus 4.5</option>
+            <option value="claude-opus-4">Claude Opus 4</option>
+            <option value="claude-sonnet-4.5">Claude Sonnet 4.5</option>
+            <option value="claude-sonnet-4">Claude Sonnet 4</option>
+            <option value="claude-haiku-4">Claude Haiku 4 (빠름)</option>
+          </optgroup>
+          <optgroup label="── Claude 3 계열 ──">
+            <option value="claude-opus-3.7">Claude Opus 3.7</option>
+            <option value="claude-sonnet-3.7">Claude Sonnet 3.7</option>
+            <option value="claude-3.5-sonnet">Claude 3.5 Sonnet</option>
+            <option value="claude-3-opus">Claude 3 Opus</option>
+          </optgroup>
+        </select>
+        <button class="btn btn-sm btn-primary" onclick="gsSelectModel()" id="gsModelBtn" style="flex-shrink:0">모델 적용</button>
+      </div>
+      <div id="gsModelStatus" style="font-size:10px;color:var(--dim);padding-top:3px">연결 후 모델을 선택하세요</div>
+    </div>
+
+    <!-- 스크린샷 -->
+    <div style="flex:1;position:relative;background:#000;min-height:300px;overflow:hidden">
+      <div id="gsModalPlaceholder" style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;color:var(--dim);gap:10px;font-size:11px">
+        <div style="font-size:48px">🤖</div>
+        <div style="text-align:center;line-height:1.8">연결 버튼을 클릭하면<br>Genspark 화면이 여기 표시됩니다</div>
+      </div>
+      <img id="gsModalScreen" style="display:none;width:100%;height:100%;object-fit:contain" alt="Genspark">
+    </div>
+
+    <!-- 실시간 텍스트 & 저장 -->
+    <div style="height:130px;display:flex;flex-direction:column;border-top:1px solid var(--border);flex-shrink:0">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:5px 14px;background:var(--bg3);border-bottom:1px solid var(--border)">
+        <span style="font-size:10px;font-weight:700;color:var(--muted)">💬 실시간 텍스트 <span id="gsModalLen" style="color:var(--gold)">0자</span></span>
+        <div style="display:flex;gap:5px">
+          <button class="btn btn-sm btn-success" onclick="gsManualSave()">💾 저장</button>
+          <button class="btn btn-sm btn-outline" onclick="gsCopyText()">📋 복사</button>
+          <button class="ibtn" onclick="gsClear()" title="초기화">🗑</button>
+          <button class="ibtn" onclick="refreshGsScreen()" title="스크린샷">📸</button>
+          <button class="ibtn" onclick="gsDiagnose()" title="입력창 DOM 진단" style="color:var(--orange)">🔍 진단</button>
+        </div>
+      </div>
+      <div id="gsModalText" style="flex:1;overflow-y:auto;padding:8px 14px;font-size:11px;line-height:1.7;color:var(--text);white-space:pre-wrap">Genspark AI 응답이 여기 실시간으로 표시됩니다...</div>
+    </div>
+
+    <!-- 수동 저장 -->
+    <div style="padding:10px 14px;border-top:1px solid var(--border);background:var(--bg3);flex-shrink:0">
+      <div style="font-size:10px;color:var(--muted);margin-bottom:5px">✋ 수동 저장 — Genspark에서 복사한 내용 붙여넣기</div>
+      <div style="display:flex;gap:6px">
+        <textarea id="gsModalManual" style="flex:1;background:var(--bg4);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:11px;padding:6px;resize:none;font-family:var(--font)" rows="2" placeholder="Genspark 응답을 복사해서 붙여넣으세요..."></textarea>
+        <button class="btn btn-success" onclick="gsModalManualSave()">💾 저장</button>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<div class="toasts" id="toasts"></div>
+<div class="loading-overlay" id="loadingOverlay" style="display:none">
+  <div class="loading-spinner"></div>
+  <div class="loading-text" id="loadingText">처리 중...</div>
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,24 @@
+{
+  "name": "도서집필도우미-v4",
+  "version": "4.0.0",
+  "description": "AI 도서 집필 자동화 v4 — Claude API + Gemini + GWS",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@google/generative-ai": "^0.21.0",
+    "axios": "^1.6.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "mammoth": "^1.12.0",
+    "multer": "^1.4.5-lts.1",
+    "pdf-parse": "^1.1.4",
+    "playwright": "^1.59.1",
+    "socket.io": "^4.6.0",
+    "uuid": "^9.0.0"
+  }
+}
